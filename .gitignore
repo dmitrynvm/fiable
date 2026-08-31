@@ -1,0 +1,51 @@
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / install
+build/
+dist/
+wheels/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test / type / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Tools
+.ipynb_checkpoints/
+*.swp
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.code-workspace
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime output if generated next to the package
+report/
+*.gguf
+nsys-rep/
+*.nsys-rep
+*.qdrep

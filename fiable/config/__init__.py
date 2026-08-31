@@ -1,0 +1,60 @@
+"""Configuration module for Fiable."""
+
+from fiable.config.settings import (
+    ModelConfig,
+    MODELS,
+    QUANT_TYPES,
+    CACHE_DIR,
+    DATASETS_DIR,
+    OUTPUT_DIR,
+    REPORT_DIR,
+    CHARTS_DIR,
+    # Legacy names (deprecated)
+    BASE_DIR,
+    COMPRESSED_DIR,
+    RESULTS_DIR,
+    EVAL_DATASETS,
+    BENCHMARK_TASKS,
+    LLAMA_QUANTIZE,
+    LLAMA_PERPLEXITY,
+    LLAMA_BENCH,
+    LLAMA_CLI,
+    LLAMA_SERVER,
+    CHART_DPI,
+    CHART_STYLE,
+    CHART_PALETTE,
+    CHART_COLORS,
+    get_model_by_name,
+    get_fp16_path,
+    get_quantized_path,
+    settings,
+)
+
+__all__ = [
+    "ModelConfig",
+    "MODELS",
+    "QUANT_TYPES",
+    "CACHE_DIR",
+    "DATASETS_DIR",
+    "OUTPUT_DIR",
+    "REPORT_DIR",
+    "CHARTS_DIR",
+    "BASE_DIR",  # deprecated
+    "COMPRESSED_DIR",  # deprecated
+    "RESULTS_DIR",  # deprecated
+    "EVAL_DATASETS",
+    "BENCHMARK_TASKS",
+    "LLAMA_QUANTIZE",
+    "LLAMA_PERPLEXITY",
+    "LLAMA_BENCH",
+    "LLAMA_CLI",
+    "LLAMA_SERVER",
+    "CHART_DPI",
+    "CHART_STYLE",
+    "CHART_PALETTE",
+    "CHART_COLORS",
+    "get_model_by_name",
+    "get_fp16_path",
+    "get_quantized_path",
+    "settings",
+]

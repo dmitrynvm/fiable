@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fiable"
+version = "0.1.0"
+description = "CLI for downloading, quantizing, evaluating, and visualizing LLM compression"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Fiable Team"}
+]
+keywords = ["llm", "compression", "quantization", "gguf", "llama.cpp", "machine-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "huggingface_hub>=0.23.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "pandas>=2.0.0",
+    "lm-eval>=0.4.0",
+    "datasets>=2.14.0",
+    "evaluate>=0.4.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.26.0",
+    "llama-cpp-python>=0.2.0",
+    "nvidia-ml-py>=12.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+fiable = "fiable.cli.commands:run"
+
+[project.urls]
+Homepage = "https://github.com/Fiable/fiable"
+Documentation = "https://github.com/Fiable/fiable#readme"
+Repository = "https://github.com/Fiable/fiable"
+Issues = "https://github.com/Fiable/fiable/issues"
+
+[tool.setuptools]
+packages = ["fiable"]
+
+[tool.setuptools.package-data]
+fiable = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
