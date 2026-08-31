@@ -229,7 +229,7 @@ fiable quantize [MODEL_NAMES...] [OPTIONS]
 ```
 
 **Options:**
-- `--types, -t TEXT` - Comma-separated quantization types
+- `--types, -t TEXT` - Comma-separated types: `W4A16`, `Q4_K_M`, … (`W4A16` → Q4_K_M)
 - `--force, -f` - Force re-quantization even if exists
 
 ### Evaluate Command
@@ -247,7 +247,23 @@ By default, evaluates **all GGUF files in `store/`** (FP16 baselines and quants)
 - `--throughput/--no-throughput` - llama-bench + NVML peak VRAM (default: true)
 - `--kl/--no-kl` - KL divergence vs FP16/Q8 logits (default: true)
 - `--dataset, -d TEXT` - Dataset for perplexity
-- `--tasks, -t TEXT` - Comma-separated benchmark tasks (default: mmlu,gsm8k)
+- `--tasks, -t TEXT` - Comma-separated accuracy tasks (default: mmlu,gsm8k)
+
+Accuracy comes from **lm-eval** over `llama-server` (MMLU = `acc`, GSM8K = `exact_match`, HumanEval = `pass@1`). Scores land in `report/evaluation.json` as `acc_<task>` and `delta_acc_<task>` vs FP16, and in the summary table as `MMLU` / `GSM8K`.
+
+Add a task in `fiable/config/settings.py`:
+
+```python
+settings.BENCHMARK_TASKS["arc_easy"] = ["arc_easy"]
+```
+
+Then:
+
+```bash
+fiable evaluate --tasks mmlu,gsm8k,arc_easy
+# or a smoke test
+fiable evaluate --tasks mmlu --limit 20
+```
 - `--limit INTEGER` - lm-eval example cap per task (omit for full run)
 - `--output, -o PATH` - Output JSON (default: `report/evaluation.json`)
 
@@ -310,6 +326,9 @@ Each chart in `report/` has a PNG and a CSV of the plotted points:
 - `compression.png` / `.csv` — Compression
 - `perplexity_vs_throughput.png` / `.csv` — Perplexity vs Throughput
 - `accuracy.png` / `.csv` — Accuracy vs Size
+- `accuracy_vs_precision.png` / `.csv` — Accuracy vs Precision (W16A16 … W2A16)
+- `accuracy_drop.png` / `.csv` — Accuracy drop vs FP16
+- `accuracy_vs_throughput.png` / `.csv` — Accuracy vs Throughput
 
 ---
 

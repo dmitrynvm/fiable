@@ -26,6 +26,7 @@ from fiable.config.settings import (
     DATASETS_DIR,
     REPORT_DIR,
     llama_binary,
+    ensure_llama_tools,
     settings,
 )
 from fiable.core.metrics import (
@@ -644,6 +645,23 @@ def evaluate_models(
     output_file: Optional[Path] = None,
 ) -> List[EvaluationResult]:
     """Evaluate multiple models and attach FP16-relative compression metrics."""
+    needed = []
+    if run_perplexity or run_long_context or run_kl:
+        needed.append("llama-perplexity")
+    if run_throughput:
+        needed.append("llama-bench")
+    if run_benchmarks:
+        needed.append("llama-server")
+    if needed:
+        console.print("[dim]Ensuring llama.cpp eval tools are available...[/dim]")
+        try:
+            tools = ensure_llama_tools(needed)
+            for name, path in tools.items():
+                console.print(f"[dim]  {name}: {path}[/dim]")
+        except Exception as e:
+            console.print(f"[red]Failed to build llama.cpp tools: {e}[/red]")
+            return []
+
     console.print(f"\n[bold]Evaluating {len(model_paths)} model(s)...[/bold]\n")
 
     results = []
@@ -725,6 +743,12 @@ def print_evaluation_summary(results: List[EvaluationResult]) -> None:
     if not results:
         return
 
+    acc_tasks: List[str] = []
+    for result in results:
+        for task in list(result.benchmarks) + list(result.benchmark_errors):
+            if task not in acc_tasks:
+                acc_tasks.append(task)
+
     table = Table()
     table.add_column("Model", style="cyan")
     table.add_column("Quant", style="magenta")
@@ -735,6 +759,9 @@ def print_evaluation_summary(results: List[EvaluationResult]) -> None:
     table.add_column("ΔPPL", justify="right")
     table.add_column("PPL-long", justify="right")
     table.add_column("KL", justify="right")
+    for task in acc_tasks:
+        table.add_column(task.upper(), justify="right")
+        table.add_column(f"Δ{task.upper()}", justify="right")
     table.add_column("Decode", justify="right")
     table.add_column("VRAM", justify="right")
 
@@ -742,7 +769,7 @@ def print_evaluation_summary(results: List[EvaluationResult]) -> None:
         return format(val, spec) if val is not None else "N/A"
 
     for result in results:
-        table.add_row(
+        cells = [
             result.model_name,
             result.quantization_type,
             _fmt(result.file_size_gb, ".2f"),
@@ -752,9 +779,15 @@ def print_evaluation_summary(results: List[EvaluationResult]) -> None:
             _fmt(result.delta_ppl, "+.1%") if result.delta_ppl is not None else "N/A",
             _fmt(result.perplexity_long, ".2f"),
             _fmt(result.kl_divergence, ".4f"),
-            _fmt(result.throughput_tokens_per_sec, ".1f"),
-            _fmt(result.peak_vram_gb or result.throughput_memory_gb, ".2f"),
-        )
+        ]
+        for task in acc_tasks:
+            acc = (result.benchmarks or {}).get(task)
+            cells.append(_fmt(acc, ".1%") if acc is not None else "N/A")
+            delta = (result.delta_acc or {}).get(task)
+            cells.append(_fmt(delta, "+.1%") if delta is not None else "N/A")
+        cells.append(_fmt(result.throughput_tokens_per_sec, ".1f"))
+        cells.append(_fmt(result.peak_vram_gb or result.throughput_memory_gb, ".2f"))
+        table.add_row(*cells)
 
     console.print()
     console.print(table)

@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from fiable.config import settings
+from fiable.config.settings import format_precision, parse_quant_spec
 from fiable.core import download, quantize, evaluate
 from fiable.core.metrics import is_baseline_quant, parse_model_identity
 from fiable.visual import plots
@@ -79,7 +80,7 @@ def quantize_cmd(
         None,
         "--types",
         "-t",
-        help="Comma-separated quantization types",
+        help="Comma-separated types: W4A16, Q4_K_M, …",
     ),
     force: bool = typer.Option(
         False,
@@ -93,11 +94,22 @@ def quantize_cmd(
     
     Example:
         fiable quantize
-        fiable quantize "Llama 3.1 8B" --types "Q4_K_M,Q5_K_M"
+        fiable quantize "Llama 3.1 8B" --types "W4A16,W8A16"
     """
     console.print("[bold cyan]Quantizing models...[/bold cyan]\n")
     
-    quant_type_list = [q.strip() for q in quant_types.split(",")] if quant_types else None
+    quant_type_list = None
+    if quant_types:
+        quant_type_list = []
+        for spec in quant_types.split(","):
+            spec = spec.strip()
+            if not spec:
+                continue
+            try:
+                quant_type_list.append(parse_quant_spec(spec))
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1) from exc
     quantize.quantize_models(models if models else None, quant_type_list, force=force)
 
 
@@ -265,7 +277,7 @@ _SOURCE_TYPE_SUFFIXES = ("BF16", "FP32", "FP16", "F32", "F16")
 
 
 def _source_type_label(path: Path) -> str:
-    """Precision label from a source GGUF/dir name (FP16, BF16, ...)."""
+    """GGUF scheme label from a source GGUF/dir name (FP16, BF16, ...)."""
     stem = path.stem.upper()
     for token in _SOURCE_TYPE_SUFFIXES:
         if stem.endswith(f"-{token}") or stem.endswith(f"_{token}"):
@@ -273,21 +285,45 @@ def _source_type_label(path: Path) -> str:
     return "FP16"
 
 
+def _status_style(quant: str) -> str:
+    q = (quant or "").upper()
+    if q in ("FP16", "F16", "BF16", "FP32", "F32"):
+        return "yellow"
+    if q in ("Q8_0", "Q6_K"):
+        return "white"
+    if q.startswith("Q2"):
+        return "cyan"
+    return "magenta"
+
+
 @app.command("store")
 def store_cmd():
     """
-    List stored artifacts: Model, Status (type), Size, File.
-    
+    List stored artifacts: Model, Status, Precision, Size, File.
+
+    Status is the GGUF scheme (Q4_K_M). Precision is WxAy (W4A16).
+
     Example:
         fiable store
     """
     quantized, unmatched = _quantized_by_model()
 
-    table = Table()
-    table.add_column("Model", style="cyan")
-    table.add_column("Status")
-    table.add_column("Size (GB)", justify="right")
+    table = Table(expand=False)
+    table.add_column("Model", style="cyan", no_wrap=True, min_width=12)
+    table.add_column("Status", no_wrap=True, min_width=7)
+    table.add_column("Precision", no_wrap=True, min_width=9)
+    table.add_column("Size (GB)", justify="right", no_wrap=True, min_width=9)
     table.add_column("File", style="dim", no_wrap=True)
+
+    def add_row(model: str, status: str, size: str, filename: str) -> None:
+        style = _status_style(status)
+        table.add_row(
+            model,
+            f"[{style}]{status}[/{style}]",
+            format_precision(status),
+            size,
+            filename,
+        )
 
     for model in settings.MODELS:
         model_dir = settings.STORE_DIR / model.local_dir
@@ -300,32 +336,21 @@ def store_cmd():
             source_path = None
 
         if source_path is not None:
-            size = _artifact_size_gb(source_path)
-            table.add_row(
+            add_row(
                 model.name,
-                f"[green]{_source_type_label(source_path)}[/green]",
-                f"{size:.2f}",
+                _source_type_label(source_path),
+                f"{_artifact_size_gb(source_path):.2f}",
                 source_path.name,
             )
         else:
-            table.add_row(
-                model.name,
-                "[dim]None[/dim]",
-                "—",
-                "—",
-            )
+            table.add_row(model.name, "[dim]None[/dim]", "—", "—", "—")
 
         files_by_type = {q: (path, size) for q, path, size in quantized.get(model.name, [])}
         for quant_type in settings.QUANT_TYPES:
             if quant_type not in files_by_type:
                 continue
             path, size = files_by_type[quant_type]
-            table.add_row(
-                model.name,
-                f"[magenta]{quant_type}[/magenta]",
-                f"{size:.2f}",
-                path.name,
-            )
+            add_row(model.name, quant_type, f"{size:.2f}", path.name)
 
     for path in unmatched:
         size = utils.helpers.get_file_size_gb(path)
@@ -334,7 +359,7 @@ def store_cmd():
             (q for q in settings.QUANT_TYPES if stem.endswith(f"-{q}")),
             "unknown",
         )
-        table.add_row("Other", f"[magenta]{quant_type}[/magenta]", f"{size:.2f}", path.name)
+        add_row("Other", quant_type, f"{size:.2f}", path.name)
 
     datasets_dir = settings.DATASETS_DIR
     if datasets_dir.exists():
@@ -345,6 +370,7 @@ def store_cmd():
             table.add_row(
                 "dataset",
                 "[cyan]local[/cyan]",
+                "—",
                 f"{size:.2f}",
                 path.name,
             )

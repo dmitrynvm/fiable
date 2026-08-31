@@ -18,6 +18,8 @@ from fiable.config.settings import (
     get_model_by_name,
     get_fp16_path,
     get_quantized_path,
+    format_precision,
+    parse_quant_spec,
     ensure_llama_src,
     ensure_llama_tools,
     llama_binary,
@@ -144,11 +146,13 @@ def quantize_model(
         QuantizationResult with metadata
     """
     output_path = get_quantized_path(model, quant_type)
+    label = format_precision(quant_type)
+    shown = label if label == quant_type else f"{label} ({quant_type})"
     
     # Check if already exists
     if output_path.exists() and not force:
         file_size = helpers.get_file_size_gb(output_path)
-        console.print(f"[yellow]Skipping {quant_type} - already exists ({file_size:.2f} GB)[/yellow]")
+        console.print(f"[yellow]Skipping {shown} - already exists ({file_size:.2f} GB)[/yellow]")
         return QuantizationResult(
             model_name=model.name,
             quantization_type=quant_type,
@@ -158,7 +162,7 @@ def quantize_model(
             already_exists=True,
         )
     
-    console.print(f"[cyan]Creating {quant_type} quantization...[/cyan]")
+    console.print(f"[cyan]Creating {shown}...[/cyan]")
     
     start_time = time.time()
     quantize_bin = llama_binary("llama-quantize")
@@ -180,7 +184,7 @@ def quantize_model(
         if result.returncode == 0:
             file_size = helpers.get_file_size_gb(output_path)
             console.print(
-                f"[green]✓ Created {quant_type} ({file_size:.2f} GB) "
+                f"[green]✓ Created {shown} ({file_size:.2f} GB) "
                 f"in {helpers.format_duration(duration)}[/green]"
             )
             return QuantizationResult(
@@ -193,7 +197,7 @@ def quantize_model(
             )
         else:
             err = (result.stderr or result.stdout or "unknown error").strip()
-            console.print(f"[red]✗ Failed to create {quant_type}[/red]")
+            console.print(f"[red]✗ Failed to create {shown}[/red]")
             if err:
                 console.print(f"[dim]{err[:500]}[/dim]")
             return QuantizationResult(
@@ -206,7 +210,7 @@ def quantize_model(
             
     except Exception as e:
         duration = time.time() - start_time
-        console.print(f"[red]✗ Error creating {quant_type}: {e}[/red]")
+        console.print(f"[red]✗ Error creating {shown}: {e}[/red]")
         return QuantizationResult(
             model_name=model.name,
             quantization_type=quant_type,
@@ -247,7 +251,9 @@ def quantize_models(
     
     # Determine quantization types
     if quant_types is None:
-        quant_types = QUANT_TYPES
+        quant_types = list(QUANT_TYPES)
+    else:
+        quant_types = [parse_quant_spec(t) for t in quant_types]
     
     if not models_to_quantize:
         console.print("[red]No valid models to quantize[/red]")
