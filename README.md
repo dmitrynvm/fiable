@@ -65,10 +65,10 @@ fiable download
 # 3. Quantize models
 fiable quantize --types "Q4_K_M,Q5_K_M"
 
-# 4. Evaluate models (defaults to all)
+# 4. Evaluate models (defaults to all) — also writes PNG charts to report/
 fiable evaluate
 
-# 5. View results in report/
+# 5. View results and charts in report/
 ```
 
 ### Download Models
@@ -108,12 +108,14 @@ fiable evaluate store/*Q4_K_M.gguf
 
 # Evaluate with custom options
 fiable evaluate store/llama-3.1-8b-instruct-Q4_K_M.gguf --no-benchmarks --dataset wikitext
+fiable evaluate --limit 50
 ```
 
 ### Generate Visualizations
 
+`fiable evaluate` writes PNG/CSV charts to `report/` when it finishes. To regenerate without re-running eval:
+
 ```bash
-# Generate charts from the evaluation report (writes PNGs to report/)
 fiable plot
 ```
 
@@ -247,9 +249,9 @@ By default, evaluates **all GGUF files in `store/`** (FP16 baselines and quants)
 - `--throughput/--no-throughput` - llama-bench + NVML peak VRAM (default: true)
 - `--kl/--no-kl` - KL divergence vs FP16/Q8 logits (default: true)
 - `--dataset, -d TEXT` - Dataset for perplexity
-- `--tasks, -t TEXT` - Comma-separated accuracy tasks (default: mmlu,gsm8k)
+- `--tasks, -t TEXT` - Comma-separated accuracy tasks (default: gsm8k)
 
-Accuracy comes from **lm-eval** over `llama-server` (MMLU = `acc`, GSM8K = `exact_match`, HumanEval = `pass@1`). Scores land in `report/evaluation.json` as `acc_<task>` and `delta_acc_<task>` vs FP16, and in the summary table as `MMLU` / `GSM8K`.
+Accuracy comes from **lm-eval** over `llama-server` (GSM8K = `exact_match`; optional MMLU = `acc`, HumanEval = `pass@1`). Scores land in `report/evaluation.json` as `acc_<task>`, `delta_acc_<task>` (absolute drop vs FP16), `acc_retention_<task>` (`A_comp / A_orig`), and `efficiency_<task>` (harmonic mean of retention and size reduction). The summary table shows `GSM8K` / `ΔGSM8K` / `Ret GSM8K` / `Eff GSM8K`.
 
 Add a task in `fiable/config/settings.py`:
 
@@ -260,19 +262,20 @@ settings.BENCHMARK_TASKS["arc_easy"] = ["arc_easy"]
 Then:
 
 ```bash
-fiable evaluate --tasks mmlu,gsm8k,arc_easy
-# or a smoke test
-fiable evaluate --tasks mmlu --limit 20
+fiable evaluate --tasks gsm8k,arc_easy
+# or a smoke test (50 WikiText chunks + 50 GSM8K problems)
+fiable evaluate --limit 50
 ```
-- `--limit INTEGER` - lm-eval example cap per task (omit for full run)
+- `--limit, -n INTEGER` - Cap WikiText PPL chunks and accuracy examples (omit for full datasets)
 - `--output, -o PATH` - Output JSON (default: `report/evaluation.json`)
+- `--plot/--no-plot` - Write PNG/CSV charts to `report/` after evaluation (default: plot)
 
 ### Plot Command
 ```bash
 fiable plot [RESULTS_FILE] [OPTIONS]
 ```
 
-Defaults to `report/evaluation.json`.
+Defaults to `report/evaluation.json`. Charts are also generated automatically at the end of `fiable evaluate`. Use this command to rebuild PNGs after editing the report.
 
 **Options:**
 - `--output-dir, -o PATH` - Output directory for charts (default: `report/`)
@@ -309,6 +312,8 @@ One file: a compact `summary` table plus full `results`.
       "delta_ppl": 0.028,
       "kl_divergence": 0.031,
       "decode_tok_s": 262.4,
+      "latency_ms": 3.81,
+      "speedup": 1.42,
       "vram_gb": 5.1
     }
   ],
@@ -316,19 +321,18 @@ One file: a compact `summary` table plus full `results`.
 }
 ```
 
-Relative fields (`compression_ratio`, `delta_ppl`, `delta_acc`, `kl_divergence`) are vs the family's FP16 baseline, or Q8_0 if FP16 is missing.
+Relative fields (`compression_ratio`, `size_reduction`, `delta_ppl`, `delta_acc`, `acc_retention`, `efficiency`, `speedup`, `kl_divergence`) are vs the family's FP16 baseline, or Q8_0 if FP16 is missing. `speedup` is decode latency \(L_{\text{orig}} / L_{\text{comp}}\) from llama-bench (ms/tok). Efficiency is the harmonic mean of accuracy retention and size reduction \((S_{\text{orig}} - S_{\text{comp}}) / S_{\text{orig}}\).
 
 ### Generated Charts
 Each chart in `report/` has a PNG and a CSV of the plotted points:
 - `perplexity_vs_size.png` / `.csv` — Perplexity vs Size
-- `throughput.png` / `.csv` — Throughput
-- `latency.png` / `.csv` — Latency (ms/tok)
 - `compression.png` / `.csv` — Compression
 - `perplexity_vs_throughput.png` / `.csv` — Perplexity vs Throughput
 - `accuracy.png` / `.csv` — Accuracy vs Size
-- `accuracy_vs_precision.png` / `.csv` — Accuracy vs Precision (W16A16 … W2A16)
-- `accuracy_drop.png` / `.csv` — Accuracy drop vs FP16
+- `accuracy_drop.png` / `.csv` — Accuracy drop vs FP16 by quantization method
 - `accuracy_vs_throughput.png` / `.csv` — Accuracy vs Throughput
+- `weight_distribution.png` / `.csv` — Weight value histograms per quantization method
+- `layerwise_quant_error.png` / `.csv` — Layer-wise relative L2 error vs FP16 per model and method
 
 ---
 
@@ -418,10 +422,10 @@ fiable download "Llama 3.1 8B"
 # 3. Quantize to recommended format
 fiable quantize "Llama 3.1 8B" --types "Q4_K_M"
 
-# 4. Evaluate all quantized models
+# 4. Evaluate all quantized models (writes report/evaluation.json + PNG charts)
 fiable evaluate
 
-# 5. Generate visualization
+# 5. Regenerate charts only (optional)
 fiable plot
 ```
 
@@ -439,6 +443,7 @@ fiable evaluate store/llama*.gguf
 
 ### Generate Charts from the Report
 ```bash
+# Rebuild PNGs without re-running evaluation
 fiable plot
 ```
 

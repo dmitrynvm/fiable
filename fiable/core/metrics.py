@@ -196,6 +196,12 @@ def bits_per_weight(file_size_gb: float, n_params: Optional[int]) -> Optional[fl
     return file_size_gb * (1024 ** 3) * 8.0 / n_params
 
 
+def _harmonic_mean(a: float, b: float) -> Optional[float]:
+    if a <= 0 or b <= 0:
+        return None
+    return 2.0 * a * b / (a + b)
+
+
 def pick_baseline(group: Iterable) -> Optional[object]:
     """Prefer FP16/BF16, then Q8_0, then the largest file in the group."""
     items = list(group)
@@ -212,7 +218,7 @@ def pick_baseline(group: Iterable) -> Optional[object]:
 
 
 def annotate_relative_metrics(results: list) -> None:
-    """Fill compression_ratio, bits_per_weight, delta_ppl, delta_acc vs baseline."""
+    """Fill compression_ratio, bits_per_weight, delta_ppl, delta_acc, acc_retention, speedup, efficiency vs baseline."""
     by_model: Dict[str, list] = defaultdict(list)
     for result in results:
         by_model[result.model_name].append(result)
@@ -228,6 +234,7 @@ def annotate_relative_metrics(results: list) -> None:
             result.baseline_quant = baseline.quantization_type
             if base_size > 0 and result.file_size_gb:
                 result.compression_ratio = base_size / result.file_size_gb
+                result.size_reduction = max(0.0, 1.0 - float(result.file_size_gb) / base_size)
             n_params = result.n_params or getattr(baseline, "n_params", None)
             if n_params and not result.n_params:
                 result.n_params = n_params
@@ -235,10 +242,35 @@ def annotate_relative_metrics(results: list) -> None:
             if base_ppl and result.perplexity:
                 result.delta_ppl = result.perplexity / base_ppl - 1.0
             deltas: Dict[str, float] = {}
+            retention: Dict[str, float] = {}
+            efficiency: Dict[str, float] = {}
+            size_red = result.size_reduction
             for task, acc in (result.benchmarks or {}).items():
-                if task in base_acc:
-                    deltas[task] = float(base_acc[task]) - float(acc)
+                if task not in base_acc:
+                    continue
+                orig = float(base_acc[task])
+                comp = float(acc)
+                deltas[task] = orig - comp
+                if orig:
+                    retention[task] = comp / orig
+                    score = _harmonic_mean(retention[task], size_red or 0.0)
+                    if score is not None:
+                        efficiency[task] = score
             result.delta_acc = deltas
+            result.acc_retention = retention
+            result.efficiency_score = efficiency
+            base_lat = getattr(baseline, "throughput_latency_ms", None)
+            comp_lat = result.throughput_latency_ms
+            if base_lat and comp_lat:
+                result.speedup = float(base_lat) / float(comp_lat)
+            else:
+                base_tps = getattr(baseline, "throughput_tokens_per_sec", None)
+                comp_tps = result.throughput_tokens_per_sec
+                if base_tps and comp_tps:
+                    result.speedup = float(comp_tps) / float(base_tps)
+            base_ttft = getattr(baseline, "ttft_ms", None)
+            if base_ttft and result.ttft_ms:
+                result.prefill_speedup = float(base_ttft) / float(result.ttft_ms)
 
 
 def _nvml_used_bytes() -> Optional[int]:

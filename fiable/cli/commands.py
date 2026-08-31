@@ -154,12 +154,14 @@ def evaluate_cmd(
         None,
         "--tasks",
         "-t",
-        help="Comma-separated benchmark tasks (default: mmlu,gsm8k)",
+        help="Comma-separated benchmark tasks (default: gsm8k)",
     ),
     limit: Optional[int] = typer.Option(
         None,
         "--limit",
-        help="lm-eval --limit (examples per task); omit for full run",
+        "-n",
+        min=1,
+        help="Cap samples for WikiText PPL (chunks) and accuracy (lm-eval). Omit for full datasets.",
     ),
     output: Optional[Path] = typer.Option(
         None,
@@ -167,16 +169,24 @@ def evaluate_cmd(
         "-o",
         help="Output JSON (default: report/evaluation.json)",
     ),
+    plot: bool = typer.Option(
+        True,
+        "--plot/--no-plot",
+        help="Write PNG/CSV charts to report/ after evaluation",
+    ),
 ):
     """
     Evaluate quantized models against an FP16 baseline.
 
-    By default, evaluates all GGUF files in store/ (FP16 + quants).
+    By default, evaluates all GGUF files in store/ (FP16 + quants)
+    and writes charts next to the JSON report.
 
     Example:
         fiable evaluate
         fiable evaluate store/*Q4_K_M.gguf --no-benchmarks
+        fiable evaluate --limit 50
         fiable evaluate --tasks gsm8k --limit 50
+        fiable evaluate --no-plot
     """
     console.print("[bold cyan]Evaluating models...[/bold cyan]\n")
 
@@ -192,7 +202,7 @@ def evaluate_cmd(
 
     benchmark_tasks = [t.strip() for t in tasks.split(",")] if tasks else None
 
-    evaluate.evaluate_models(
+    results = evaluate.evaluate_models(
         model_paths,
         run_perplexity=perplexity,
         run_benchmarks=benchmarks,
@@ -201,9 +211,12 @@ def evaluate_cmd(
         run_kl=kl,
         dataset=dataset,
         benchmark_tasks=benchmark_tasks,
-        benchmark_limit=limit,
+        limit=limit,
         output_file=output,
     )
+    if plot and results:
+        results_file = output or settings.REPORT_DIR / "evaluation.json"
+        _generate_charts(results_file, results_file.parent)
 
 
 @app.command()
@@ -226,15 +239,31 @@ def plot(
         fiable plot
         fiable plot report/evaluation.json
     """
-    console.print("[bold cyan]Generating charts...[/bold cyan]\n")
-
     if results_file is None:
         results_file = settings.REPORT_DIR / "evaluation.json"
     if not results_file.exists():
         console.print(f"[red]Results file not found: {results_file}[/red]")
         raise typer.Exit(1)
 
-    plots.generate_all_charts(results_file, output_dir)
+    _generate_charts(results_file, output_dir)
+
+
+def _generate_charts(results_file: Path, output_dir: Optional[Path] = None) -> None:
+    """Write PNG/CSV charts from an evaluation JSON; never fail the parent command."""
+    console.print("\n[bold cyan]Generating charts...[/bold cyan]\n")
+    try:
+        chart_paths = plots.generate_all_charts(results_file, output_dir)
+    except Exception as exc:
+        console.print(f"[yellow]Chart generation failed: {exc}[/yellow]")
+        console.print("[dim]Retry with: fiable plot[/dim]")
+        return
+    if not chart_paths:
+        console.print("[yellow]No charts were generated[/yellow]")
+        return
+    chart_dir = next(iter(chart_paths.values())).parent
+    console.print(f"\n[bold]Charts saved to {chart_dir}/[/bold]")
+    for path in chart_paths.values():
+        console.print(f"  [green]{path.name}[/green]")
 
 
 def _quantized_by_model():

@@ -1,8 +1,12 @@
 """Visualization functionality for compression analysis."""
 
 import json
+import re
+import sys
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
@@ -11,9 +15,24 @@ import pandas as pd
 from rich.console import Console
 
 from fiable.utils import helpers
-from fiable.config.settings import STORE_DIR, CHARTS_DIR, CHART_DPI, CHART_COLORS, MODELS, format_precision
+from fiable.config.settings import (
+    STORE_DIR,
+    CHARTS_DIR,
+    CHART_DPI,
+    CHART_COLORS,
+    MODELS,
+    QUANT_TYPES,
+    parse_quant_spec,
+    llama_src_dir,
+)
 from fiable.core.evaluate import EvaluationResult
-from fiable.core.metrics import annotate_relative_metrics, read_gguf_parameter_count
+from fiable.core.metrics import (
+    QUANT_ALIASES,
+    annotate_relative_metrics,
+    is_baseline_quant,
+    pick_baseline,
+    read_gguf_parameter_count,
+)
 
 
 console = Console()
@@ -30,11 +49,11 @@ _BAR_EDGE = "#333333"
 _ANNOTATE = "#777777"
 _SERIES = (
     {"color": "#1f77b4", "ls": "-", "marker": "o"},
-    {"color": "#d62728", "ls": "-", "marker": "o"},
-    {"color": "#2ca02c", "ls": "-", "marker": "o"},
-    {"color": "#ff7f0e", "ls": "-", "marker": "o"},
-    {"color": "#9467bd", "ls": "-", "marker": "o"},
-    {"color": "#8c564b", "ls": "-", "marker": "o"},
+    {"color": "#d62728", "ls": "-", "marker": "s"},
+    {"color": "#2ca02c", "ls": "-", "marker": "D"},
+    {"color": "#ff7f0e", "ls": "-", "marker": "^"},
+    {"color": "#9467bd", "ls": "-", "marker": "v"},
+    {"color": "#8c564b", "ls": "-", "marker": "P"},
 )
 
 
@@ -96,21 +115,71 @@ def _pretty_model(name: str) -> str:
     return " ".join(parts) or name
 
 
+# High-bit → low-bit GGUF methods (baselines first, then QUANT_TYPES).
+_QUANT_ORDER = (
+    "FP32",
+    "F32",
+    "FP16",
+    "F16",
+    "BF16",
+    "Q8_0",
+    "Q6_K",
+    "Q5_K_M",
+    "Q5_K_S",
+    "Q5_0",
+    "Q4_K_M",
+    "Q4_K_S",
+    "Q4_0",
+    "Q3_K_L",
+    "Q3_K_M",
+    "Q3_K_S",
+    "Q2_K",
+)
+
+
 def _pretty_quant(quant: str) -> str:
-    """Q4_K_M → W4A16."""
-    return format_precision(quant) if quant else quant
+    """Canonical GGUF method name: F16 → FP16, W4A16 → Q4_K_M, Q4_K_M unchanged."""
+    if not quant:
+        return quant
+    raw = str(quant).strip()
+    upper = raw.upper().replace(" ", "")
+    if upper in QUANT_ALIASES:
+        return QUANT_ALIASES[upper]
+    for name in _QUANT_ORDER:
+        if name.upper() == upper:
+            return name
+    for name in QUANT_TYPES:
+        if str(name).upper() == upper:
+            return name
+    try:
+        mapped = parse_quant_spec(raw)
+    except ValueError:
+        return raw
+    mapped_u = str(mapped).upper()
+    if mapped_u in QUANT_ALIASES:
+        return QUANT_ALIASES[mapped_u]
+    for name in _QUANT_ORDER:
+        if name.upper() == mapped_u:
+            return name
+    return mapped
 
 
-_PRECISION_ORDER = ("W32A32", "W16A16", "W8A16", "W6A16", "W5A16", "W4A16", "W3A16", "W2A16")
+def _quant_rank(label: str) -> tuple:
+    pretty = _pretty_quant(label)
+    key = pretty.upper()
+    order = [name.upper() for name in _QUANT_ORDER]
+    if key in order:
+        return (order.index(key), pretty)
+    return (len(_QUANT_ORDER), pretty)
+
+
+def _ordered_quants(labels) -> List[str]:
+    return sorted(dict.fromkeys(labels), key=_quant_rank)
+
+
 _TASK_ORDER = ("mmlu", "gsm8k", "humaneval")
 _TASK_MARKERS = ("o", "s", "^", "D", "v", "P")
 _TASK_LINESTYLES = ("-", "--", ":", "-.", "-", "--")
-
-
-def _precision_rank(label: str) -> tuple:
-    if label in _PRECISION_ORDER:
-        return (_PRECISION_ORDER.index(label), label)
-    return (len(_PRECISION_ORDER), str(label or ""))
 
 
 def _task_rank(task: str) -> tuple:
@@ -153,6 +222,7 @@ def _accuracy_frame(
             delta = _finite((r.delta_acc or {}).get(task))
             if require_delta and delta is None:
                 continue
+            retention = _finite((r.acc_retention or {}).get(task))
             tok_s = _finite(r.throughput_tokens_per_sec)
             if require_throughput and tok_s is None:
                 continue
@@ -162,6 +232,7 @@ def _accuracy_frame(
                 "task": task,
                 "acc": acc,
                 "delta_acc": delta,
+                "acc_retention": retention,
                 "size_gb": r.file_size_gb,
                 "tok_s": tok_s,
             })
@@ -185,7 +256,7 @@ def _draw_acc_series(ax, df: pd.DataFrame, xcol: str, ycol: str, annotate: bool 
             ax.plot(
                 part[xcol],
                 part[ycol],
-                marker=ts["marker"],
+                marker=st["marker"],
                 markersize=8,
                 markeredgecolor=st["color"],
                 markerfacecolor=st["color"],
@@ -194,6 +265,7 @@ def _draw_acc_series(ax, df: pd.DataFrame, xcol: str, ycol: str, annotate: bool 
                 color=st["color"],
                 linestyle=ts["ls"],
                 linewidth=1.8,
+                zorder=3,
             )
             if annotate:
                 for _, row in part.iterrows():
@@ -340,109 +412,6 @@ def plot_size_vs_quality(
     return _finish_plot(df, output_path, "perplexity_vs_size.png")
 
 
-def plot_throughput_comparison(
-    results: List[EvaluationResult],
-    output_path: Optional[Path] = None,
-) -> Path:
-    """Bar chart of decode throughput by model and quantization."""
-    console.print("[cyan]Creating throughput comparison plot...[/cyan]")
-
-    rows = []
-    for r in results:
-        if r.throughput_tokens_per_sec is None:
-            continue
-        rows.append({
-            "model": _pretty_model(r.model_name),
-            "quant": _pretty_quant(r.quantization_type),
-            "decode": r.throughput_tokens_per_sec,
-        })
-    if not rows:
-        console.print("[yellow]No throughput data available for plotting[/yellow]")
-        return None
-
-    df = pd.DataFrame(rows)
-    fig, ax = plt.subplots(figsize=(12, 7))
-    unique_models = list(df["model"].unique())
-    colors = _model_colors(unique_models)
-    quants = list(dict.fromkeys(df["quant"]))
-    width = 0.8 / max(len(unique_models), 1)
-    x = range(len(quants))
-    for i, model in enumerate(unique_models):
-        model_df = df[df["model"] == model].set_index("quant")
-        heights = [float(model_df.loc[q, "decode"]) if q in model_df.index else 0 for q in quants]
-        offset = width * (i - (len(unique_models) - 1) / 2)
-        ax.bar(
-            [j + offset for j in x],
-            heights,
-            width,
-            label=model,
-            color=colors[model],
-            edgecolor=_BAR_EDGE,
-            linewidth=0.7,
-        )
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(quants, rotation=30, ha="right")
-    ax.set_xlabel("Quant", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Throughput (toks/s)", fontsize=12, fontweight="bold")
-    ax.set_title("Throughput", fontsize=14, fontweight="bold")
-    ax.legend(loc="best", frameon=True)
-    _style_axes(ax, y_only=True)
-    return _finish_plot(df, output_path, "throughput.png")
-
-
-def plot_latency(
-    results: List[EvaluationResult],
-    output_path: Optional[Path] = None,
-) -> Path:
-    """Bar chart of mean decode latency (ms/tok) from llama-bench."""
-    console.print("[cyan]Creating latency plot...[/cyan]")
-
-    rows = []
-    for r in results:
-        ms = r.throughput_latency_ms
-        if ms is None and r.throughput_tokens_per_sec:
-            ms = 1000.0 / r.throughput_tokens_per_sec
-        if ms is None:
-            continue
-        rows.append({
-            "model": _pretty_model(r.model_name),
-            "quant": _pretty_quant(r.quantization_type),
-            "latency_ms": ms,
-        })
-    if not rows:
-        console.print("[yellow]No latency data available for plotting[/yellow]")
-        return None
-
-    df = pd.DataFrame(rows)
-    fig, ax = plt.subplots(figsize=(12, 7))
-    unique_models = list(df["model"].unique())
-    colors = _model_colors(unique_models)
-    quants = list(dict.fromkeys(df["quant"]))
-    width = 0.8 / max(len(unique_models), 1)
-    x = range(len(quants))
-    for i, model in enumerate(unique_models):
-        model_df = df[df["model"] == model].set_index("quant")
-        heights = [float(model_df.loc[q, "latency_ms"]) if q in model_df.index else 0 for q in quants]
-        offset = width * (i - (len(unique_models) - 1) / 2)
-        ax.bar(
-            [j + offset for j in x],
-            heights,
-            width,
-            label=model,
-            color=colors[model],
-            edgecolor=_BAR_EDGE,
-            linewidth=0.7,
-        )
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(quants, rotation=30, ha="right")
-    ax.set_xlabel("Quant", fontsize=12, fontweight="bold")
-    ax.set_ylabel("ms/tok", fontsize=12, fontweight="bold")
-    ax.set_title("Latency", fontsize=14, fontweight="bold")
-    ax.legend(loc="best", frameon=True)
-    _style_axes(ax, y_only=True)
-    return _finish_plot(df, output_path, "latency.png")
-
-
 def plot_compression_ratio(
     results: List[EvaluationResult],
     output_path: Optional[Path] = None,
@@ -474,42 +443,43 @@ def plot_compression_ratio(
     df = pd.DataFrame(rows)
     fig, ax = plt.subplots(figsize=(12, 7))
     unique_models = list(df["model"].unique())
-    quants = list(dict.fromkeys(df["quant"]))
-    quant_colors = dict(zip(quants, _palette(len(quants))))
-    width = 0.8 / max(len(quants), 1)
-    x = range(len(unique_models))
-    for i, quant in enumerate(quants):
-        qdf = df[df["quant"] == quant].set_index("model")
-        heights = [float(qdf.loc[m, "ratio"]) if m in qdf.index else 0 for m in unique_models]
-        offset = width * (i - (len(quants) - 1) / 2)
+    colors = _model_colors(unique_models)
+    # Low compression (FP16, ratio ~1) → high compression (Q2_K).
+    quants = _ordered_quants(df["quant"])
+    width = 0.8 / max(len(unique_models), 1)
+    x = range(len(quants))
+    for i, model in enumerate(unique_models):
+        model_df = df[df["model"] == model].set_index("quant")
+        heights = [float(model_df.loc[q, "ratio"]) if q in model_df.index else 0 for q in quants]
+        offset = width * (i - (len(unique_models) - 1) / 2)
         bars = ax.bar(
             [j + offset for j in x],
             heights,
             width,
-            label=quant,
-            color=quant_colors[quant],
+            label=model,
+            color=colors[model],
             edgecolor=_BAR_EDGE,
             linewidth=0.7,
         )
-        for bar, model in zip(bars, unique_models):
-            if model in qdf.index and pd.notna(qdf.loc[model, "bpw"]):
+        for bar, quant in zip(bars, quants):
+            if quant in model_df.index and pd.notna(model_df.loc[quant, "bpw"]):
                 ax.annotate(
-                    f"{qdf.loc[model, 'bpw']:.1f} bpw",
+                    f"{model_df.loc[quant, 'bpw']:.1f} bpw",
                     (bar.get_x() + bar.get_width() / 2, bar.get_height()),
                     ha="center",
                     va="bottom",
-                    fontsize=6,
+                    fontsize=7,
                     rotation=90,
-                    color=quant_colors[quant],
+                    color=colors[model],
                 )
 
-    ax.axhline(1.0, color="#b3b3b3", linestyle="--", linewidth=1.1, alpha=0.9, label="Baseline")
+    ax.axhline(1.0, color="#b3b3b3", linestyle="--", linewidth=1.1, alpha=0.9, zorder=0)
     ax.set_xticks(list(x))
-    ax.set_xticklabels(unique_models)
-    ax.set_xlabel("Model", fontsize=12, fontweight="bold")
+    ax.set_xticklabels(quants, rotation=30, ha="right")
+    ax.set_xlabel("Quantization method", fontsize=12, fontweight="bold")
     ax.set_ylabel("Ratio (×)", fontsize=12, fontweight="bold")
     ax.set_title("Compression", fontsize=14, fontweight="bold")
-    ax.legend(loc="best", frameon=True, fontsize=8)
+    ax.legend(loc="best", frameon=True)
     _style_axes(ax, y_only=True)
     return _finish_plot(df, output_path, "compression.png")
 
@@ -615,50 +585,24 @@ def plot_accuracy_vs_size(
     return _finish_plot(df[["model", "quant", "task", "acc", "size_gb"]], output_path, "accuracy.png")
 
 
-def plot_accuracy_vs_precision(
-    results: List[EvaluationResult],
-    output_path: Optional[Path] = None,
-) -> Path:
-    """Accuracy vs GGUF precision (W16A16 … W2A16)."""
-    console.print("[cyan]Creating accuracy vs precision plot...[/cyan]")
-    df = _accuracy_frame(results)
-    if df is None:
-        console.print("[yellow]No benchmark scores available for plotting[/yellow]")
-        return None
-
-    order = sorted(df["quant"].unique(), key=_precision_rank)
-    rank = {q: i for i, q in enumerate(order)}
-    df = df.copy()
-    df["x"] = df["quant"].map(rank)
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-    _draw_acc_series(ax, df, "x", "acc", annotate=False)
-    ax.set_xticks(list(range(len(order))))
-    ax.set_xticklabels(order, rotation=0)
-    ax.set_xlabel("Precision", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Accuracy", fontsize=12, fontweight="bold")
-    ax.set_title("Accuracy vs Precision", fontsize=14, fontweight="bold")
-    ax.legend(loc="best", fontsize=9, frameon=True)
-    _style_axes(ax, y_only=True)
-    return _finish_plot(
-        df[["model", "quant", "task", "acc"]],
-        output_path,
-        "accuracy_vs_precision.png",
-    )
-
-
 def plot_accuracy_drop(
     results: List[EvaluationResult],
     output_path: Optional[Path] = None,
 ) -> Path:
-    """Accuracy drop vs FP16 (delta_acc) across precision."""
+    """Accuracy drop vs FP16 (delta_acc) across quantization methods."""
     console.print("[cyan]Creating accuracy drop vs FP16 plot...[/cyan]")
     df = _accuracy_frame(results, require_delta=True)
     if df is None:
         console.print("[yellow]No accuracy-drop (delta_acc) data available for plotting[/yellow]")
         return None
 
-    order = sorted(df["quant"].unique(), key=_precision_rank)
+    # FP16 is the baseline (drop is always 0); plot quantized methods only.
+    df = df[~df["quant"].map(is_baseline_quant)].copy()
+    if df.empty:
+        console.print("[yellow]No quantized accuracy-drop points to plot[/yellow]")
+        return None
+
+    order = sorted(df["quant"].unique(), key=_quant_rank)
     rank = {q: i for i, q in enumerate(order)}
     df = df.copy()
     df["x"] = df["quant"].map(rank)
@@ -667,8 +611,8 @@ def plot_accuracy_drop(
     _draw_acc_series(ax, df, "x", "delta_acc", annotate=False)
     ax.axhline(0.0, color="#b3b3b3", linestyle="--", linewidth=1.1, alpha=0.9, zorder=0)
     ax.set_xticks(list(range(len(order))))
-    ax.set_xticklabels(order)
-    ax.set_xlabel("Precision", fontsize=12, fontweight="bold")
+    ax.set_xticklabels(order, rotation=30, ha="right")
+    ax.set_xlabel("Quantization method", fontsize=12, fontweight="bold")
     ax.set_ylabel("Accuracy drop vs FP16", fontsize=12, fontweight="bold")
     ax.set_title("Accuracy Drop vs FP16", fontsize=14, fontweight="bold")
     ax.legend(loc="best", fontsize=9, frameon=True)
@@ -705,6 +649,519 @@ def plot_accuracy_vs_throughput(
     )
 
 
+_WEIGHT_SAMPLE_N = 400_000
+_WEIGHT_BINS = 96
+_WEIGHT_MAX_TENSORS = 16
+_SKIP_TENSOR_SUBSTR = ("norm", "bias", "mask", "rope", "embd", "embed")
+
+
+def _import_gguf():
+    """Load llama.cpp gguf-py (store clone or already installed)."""
+    try:
+        import gguf
+        from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
+        from gguf.quants import dequantize
+        return gguf, dequantize, GGMLQuantizationType, GGML_QUANT_SIZES
+    except ImportError:
+        src = llama_src_dir() / "gguf-py"
+        if src.is_dir() and str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+        import gguf
+        from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
+        from gguf.quants import dequantize
+        return gguf, dequantize, GGMLQuantizationType, GGML_QUANT_SIZES
+
+
+def _keep_weight_tensor(tensor) -> bool:
+    name = str(tensor.name).lower()
+    if any(token in name for token in _SKIP_TENSOR_SUBSTR):
+        return False
+    if name.endswith("output.weight"):
+        return False
+    return int(tensor.n_elements) >= 4096
+
+
+def _sample_tensor_weights(tensor, n_take: int, rng, dequantize, qtype_enum, quant_sizes) -> np.ndarray:
+    if n_take <= 0:
+        return np.empty(0, dtype=np.float32)
+    qtype = tensor.tensor_type
+    data = np.asarray(tensor.data)
+    float_types = {qtype_enum.F16, qtype_enum.F32, qtype_enum.F64, qtype_enum.BF16}
+    if qtype in float_types:
+        try:
+            flat = dequantize(data, qtype).astype(np.float32, copy=False).ravel()
+        except Exception:
+            flat = np.asarray(data, dtype=np.float32).ravel()
+        if flat.size <= n_take:
+            return np.ascontiguousarray(flat)
+        return rng.choice(flat, size=n_take, replace=False).astype(np.float32, copy=False)
+
+    rows = data.reshape(-1, data.shape[-1])
+    block_size, type_size = quant_sizes[qtype]
+    if type_size <= 0:
+        return np.empty(0, dtype=np.float32)
+    elems_per_row = (rows.shape[-1] // type_size) * block_size
+    if elems_per_row <= 0 or rows.shape[0] == 0:
+        return np.empty(0, dtype=np.float32)
+    n_rows_needed = min(rows.shape[0], max(1, int(np.ceil(n_take / elems_per_row))))
+    idx = rng.choice(rows.shape[0], size=n_rows_needed, replace=False)
+    weights = dequantize(np.ascontiguousarray(rows[idx]), qtype)
+    weights = np.asarray(weights, dtype=np.float32).ravel()
+    if weights.size > n_take:
+        weights = rng.choice(weights, size=n_take, replace=False)
+    return weights.astype(np.float32, copy=False)
+
+
+def sample_gguf_weights(path: Path, n: int = _WEIGHT_SAMPLE_N, seed: int = 0) -> np.ndarray:
+    """Dequantize a random subset of 2D layer weights from a GGUF."""
+    gguf, dequantize, qtype_enum, quant_sizes = _import_gguf()
+    reader = gguf.GGUFReader(str(path))
+    rng = np.random.default_rng(seed)
+    tensors = [t for t in reader.tensors if _keep_weight_tensor(t)]
+    if not tensors:
+        tensors = [t for t in reader.tensors if int(t.n_elements) >= 4096]
+    tensors = sorted(tensors, key=lambda t: int(t.n_elements), reverse=True)[:_WEIGHT_MAX_TENSORS]
+    rng.shuffle(tensors)
+    parts: List[np.ndarray] = []
+    left = int(n)
+    for i, tensor in enumerate(tensors):
+        if left <= 0:
+            break
+        remaining_t = len(tensors) - i
+        take = min(left, max(left // remaining_t, min(left, 40_000)))
+        try:
+            sample = _sample_tensor_weights(
+                tensor, take, rng, dequantize, qtype_enum, quant_sizes
+            )
+        except Exception as exc:
+            console.print(f"[dim]    skip {tensor.name}: {exc}[/dim]")
+            continue
+        if sample.size:
+            parts.append(sample)
+            left -= int(sample.size)
+    if not parts:
+        return np.empty(0, dtype=np.float32)
+    return np.concatenate(parts)
+
+
+def plot_weight_distributions(
+    results: List[EvaluationResult],
+    output_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Histogram of dequantized weights, one panel per quantization method."""
+    console.print("[cyan]Creating weight distribution plot...[/cyan]")
+    grouped: Dict[str, List[EvaluationResult]] = defaultdict(list)
+    for result in results:
+        path = Path(result.model_path)
+        if path.exists() and path.suffix.lower() == ".gguf":
+            grouped[result.model_name].append(result)
+    if not grouped:
+        console.print("[yellow]No GGUF files found for weight distributions[/yellow]")
+        return None
+
+    try:
+        _import_gguf()
+    except ImportError:
+        console.print(
+            "[yellow]gguf-py not found; skip weight distributions "
+            "(need store/llama.cpp/gguf-py)[/yellow]"
+        )
+        return None
+
+    samples: Dict[Tuple[str, str], np.ndarray] = {}
+    model_names = []
+    quant_labels = []
+    for model_name, group in grouped.items():
+        pretty_model = _pretty_model(model_name)
+        model_names.append(pretty_model)
+        ordered = sorted(
+            group, key=lambda r: _quant_rank(_pretty_quant(r.quantization_type))
+        )
+        for result in ordered:
+            quant = _pretty_quant(result.quantization_type)
+            path = Path(result.model_path)
+            console.print(f"[dim]  sampling {path.name}...[/dim]")
+            arr = sample_gguf_weights(path)
+            if arr.size == 0:
+                console.print(f"[yellow]  no weights sampled from {path.name}[/yellow]")
+                continue
+            samples[(pretty_model, quant)] = arr
+            if quant not in quant_labels:
+                quant_labels.append(quant)
+
+    if not samples:
+        console.print("[yellow]No weight samples to plot[/yellow]")
+        return None
+
+    quant_labels = sorted(quant_labels, key=_quant_rank)
+    model_names = list(dict.fromkeys(model_names))
+    n_models, n_quants = len(model_names), len(quant_labels)
+    fig, axes = plt.subplots(
+        n_models,
+        n_quants,
+        figsize=(max(3.2 * n_quants, 8), max(3.0 * n_models, 4.5)),
+        squeeze=False,
+        sharex="row",
+        sharey="row",
+    )
+    colors = _palette(n_quants)
+    csv_rows = []
+
+    for i, model in enumerate(model_names):
+        ref = None
+        for candidate in quant_labels:
+            if (model, candidate) in samples and is_baseline_quant(candidate):
+                ref = samples[(model, candidate)]
+                break
+        if ref is None:
+            ref = next(samples[(model, q)] for q in quant_labels if (model, q) in samples)
+        span = float(max(abs(np.percentile(ref, 0.5)), abs(np.percentile(ref, 99.5)), 1e-3))
+        xlim = (-span, span)
+        bins = np.linspace(xlim[0], xlim[1], _WEIGHT_BINS + 1)
+        ref_density, _ = np.histogram(ref, bins=bins, density=True)
+        ref_centers = 0.5 * (bins[:-1] + bins[1:])
+        for j, quant in enumerate(quant_labels):
+            ax = axes[i, j]
+            arr = samples.get((model, quant))
+            if arr is None:
+                ax.axis("off")
+                continue
+            density, edges = np.histogram(arr, bins=bins, density=True)
+            ax.hist(
+                arr,
+                bins=bins,
+                density=True,
+                color=colors[j],
+                edgecolor="none",
+                alpha=0.88,
+                zorder=2,
+            )
+            if not is_baseline_quant(quant):
+                ax.plot(
+                    ref_centers,
+                    ref_density,
+                    color="#444444",
+                    lw=1.05,
+                    ls="--",
+                    alpha=0.8,
+                    zorder=3,
+                    label="FP16",
+                )
+            ax.set_xlim(*xlim)
+            if i == 0:
+                ax.set_title(quant, fontsize=11, fontweight="bold")
+            if j == 0:
+                ax.set_ylabel(f"{model}\nDensity", fontsize=9)
+            if i == n_models - 1:
+                ax.set_xlabel("Weight value", fontsize=9)
+            ax.text(
+                0.97,
+                0.94,
+                f"σ={float(arr.std()):.3f}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=8,
+                color="#444444",
+            )
+            _style_axes(ax, y_only=True)
+            if i == 0 and j == 1:
+                ax.legend(loc="upper left", fontsize=7, frameon=True)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            for center, dens in zip(centers, density):
+                csv_rows.append(
+                    {
+                        "model": model,
+                        "quant": quant,
+                        "weight": float(center),
+                        "density": float(dens),
+                    }
+                )
+
+    fig.suptitle("Distribution of weights by quantization method", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return _finish_plot(pd.DataFrame(csv_rows), output_path, "weight_distribution.png")
+
+
+_BLK_RE = re.compile(r"^blk\.(\d+)\.(.+)$")
+_LAYER_MAX_ROWS = 512
+_KIND_SPECS = (
+    ("attn_q.weight", "Q", "#1f77b4", "-"),
+    ("attn_k.weight", "K", "#5fa8d3", "-"),
+    ("attn_v.weight", "V", "#9ecae1", "-"),
+    ("attn_output.weight", "O", "#9467bd", "-"),
+    ("ffn_gate.weight", "gate", "#d62728", "--"),
+    ("ffn_up.weight", "up", "#ff7f0e", "--"),
+    ("ffn_down.weight", "down", "#2ca02c", "--"),
+)
+_KIND_LABEL = {name: label for name, label, _, _ in _KIND_SPECS}
+_KIND_STYLE = {label: (color, ls) for _, label, color, ls in _KIND_SPECS}
+
+
+def _packed_rows(tensor) -> np.ndarray:
+    data = np.asarray(tensor.data)
+    if data.ndim <= 1:
+        return data.reshape(1, -1)
+    return data.reshape(-1, data.shape[-1])
+
+
+def _dequantize_array(tensor, dequantize) -> np.ndarray:
+    data = np.ascontiguousarray(tensor.data)
+    try:
+        return np.asarray(dequantize(data, tensor.tensor_type), dtype=np.float32)
+    except Exception:
+        return np.asarray(data, dtype=np.float32)
+
+
+def _rel_l2(a: np.ndarray, b: np.ndarray) -> float:
+    ref = np.asarray(a, dtype=np.float32).ravel()
+    est = np.asarray(b, dtype=np.float32).ravel()
+    n = min(ref.size, est.size)
+    if n <= 0:
+        return float("nan")
+    denom = float(np.linalg.norm(ref[:n]))
+    if denom == 0.0:
+        return 0.0
+    return float(np.linalg.norm(est[:n] - ref[:n]) / denom)
+
+
+def tensor_rel_l2(fp_tensor, q_tensor, dequantize, qtype_enum, rng, max_rows: int = _LAYER_MAX_ROWS) -> float:
+    """Relative L2 error ||Wq-W|| / ||W|| on a row subsample (exact if few rows)."""
+    float_types = {qtype_enum.F16, qtype_enum.F32, qtype_enum.F64, qtype_enum.BF16}
+    q_rows = _packed_rows(q_tensor)
+    fp_data = np.asarray(fp_tensor.data)
+    if (
+        q_tensor.tensor_type not in float_types
+        and fp_data.ndim >= 2
+        and q_rows.shape[0] == fp_data.shape[0]
+        and fp_tensor.tensor_type in float_types
+    ):
+        n_rows = int(q_rows.shape[0])
+        take = min(int(max_rows), n_rows)
+        # Sequential rows: mmap-friendly and within ~1e-4 of a random subsample.
+        idx = np.arange(take)
+        w_fp = np.asarray(fp_data[idx], dtype=np.float32)
+        w_q = np.asarray(
+            dequantize(np.ascontiguousarray(q_rows[idx]), q_tensor.tensor_type),
+            dtype=np.float32,
+        )
+        return _rel_l2(w_fp, w_q)
+
+    w_fp = _dequantize_array(fp_tensor, dequantize).ravel()
+    w_q = _dequantize_array(q_tensor, dequantize).ravel()
+    n = min(w_fp.size, w_q.size)
+    cap = int(max_rows) * 256
+    if n > cap:
+        idx = rng.choice(n, size=cap, replace=False)
+        return _rel_l2(w_fp[idx], w_q[idx])
+    return _rel_l2(w_fp[:n], w_q[:n])
+
+
+def layerwise_quant_error(
+    fp_path: Path,
+    quant_path: Path,
+    seed: int = 0,
+    fp_reader=None,
+) -> List[dict]:
+    """Per-block, per-tensor relative L2 error of a quantized GGUF vs its FP16 file."""
+    gguf, dequantize, qtype_enum, _ = _import_gguf()
+    close_fp = False
+    if fp_reader is None:
+        fp_reader = gguf.GGUFReader(str(fp_path))
+        close_fp = True
+    q_reader = gguf.GGUFReader(str(quant_path))
+    fp_map = {t.name: t for t in fp_reader.tensors}
+    rng = np.random.default_rng(seed)
+    rows: List[dict] = []
+    for tensor in q_reader.tensors:
+        match = _BLK_RE.match(str(tensor.name))
+        if not match:
+            continue
+        kind = match.group(2)
+        if kind not in _KIND_LABEL:
+            continue
+        fp_tensor = fp_map.get(tensor.name)
+        if fp_tensor is None:
+            continue
+        try:
+            rel = tensor_rel_l2(fp_tensor, tensor, dequantize, qtype_enum, rng)
+        except Exception as exc:
+            console.print(f"[dim]    skip {tensor.name}: {exc}[/dim]")
+            continue
+        if rel != rel:
+            continue
+        rows.append(
+            {
+                "layer": int(match.group(1)),
+                "tensor": _KIND_LABEL[kind],
+                "rel_l2": rel,
+            }
+        )
+    del q_reader
+    if close_fp:
+        del fp_reader
+    return rows
+
+
+def plot_layerwise_quant_error(
+    results: List[EvaluationResult],
+    output_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Relative L2 quantization error vs layer, one panel per model × method."""
+    console.print("[cyan]Creating layer-wise quantization error plot...[/cyan]")
+    grouped: Dict[str, List[EvaluationResult]] = defaultdict(list)
+    for result in results:
+        path = Path(result.model_path)
+        if path.exists() and path.suffix.lower() == ".gguf":
+            grouped[result.model_name].append(result)
+    if not grouped:
+        console.print("[yellow]No GGUF files found for layer-wise error[/yellow]")
+        return None
+
+    try:
+        _import_gguf()
+    except ImportError:
+        console.print(
+            "[yellow]gguf-py not found; skip layer-wise quantization error "
+            "(need store/llama.cpp/gguf-py)[/yellow]"
+        )
+        return None
+
+    series: Dict[Tuple[str, str], List[dict]] = {}
+    model_names: List[str] = []
+    quant_labels: List[str] = []
+    for model_name, group in grouped.items():
+        baseline = pick_baseline(group)
+        if baseline is None or not is_baseline_quant(baseline.quantization_type):
+            console.print(
+                f"[yellow]  skip {model_name}: need FP16/BF16 GGUF as error baseline[/yellow]"
+            )
+            continue
+        fp_path = Path(baseline.model_path)
+        if not fp_path.exists():
+            console.print(f"[yellow]  skip {model_name}: missing {fp_path}[/yellow]")
+            continue
+        pretty_model = _pretty_model(model_name)
+        model_names.append(pretty_model)
+        gguf, _, _, _ = _import_gguf()
+        fp_reader = gguf.GGUFReader(str(fp_path))
+        ordered = sorted(
+            group, key=lambda r: _quant_rank(_pretty_quant(r.quantization_type))
+        )
+        for result in ordered:
+            if is_baseline_quant(result.quantization_type):
+                continue
+            quant = _pretty_quant(result.quantization_type)
+            path = Path(result.model_path)
+            console.print(f"[dim]  error {path.name} vs {fp_path.name}...[/dim]")
+            rows = layerwise_quant_error(fp_path, path, fp_reader=fp_reader)
+            if not rows:
+                console.print(f"[yellow]  no layer tensors matched in {path.name}[/yellow]")
+                continue
+            series[(pretty_model, quant)] = rows
+            if quant not in quant_labels:
+                quant_labels.append(quant)
+        del fp_reader
+
+    if not series:
+        console.print("[yellow]No layer-wise errors to plot[/yellow]")
+        return None
+
+    quant_labels = sorted(quant_labels, key=_quant_rank)
+    model_names = list(dict.fromkeys(model_names))
+    n_models, n_quants = len(model_names), len(quant_labels)
+    fig, axes = plt.subplots(
+        n_models,
+        n_quants,
+        figsize=(max(3.2 * n_quants, 8), max(3.0 * n_models, 4.5)),
+        squeeze=False,
+        sharex=True,
+        sharey=False,
+    )
+    csv_rows = []
+
+    for i, model in enumerate(model_names):
+        for j, quant in enumerate(quant_labels):
+            ax = axes[i, j]
+            rows = series.get((model, quant))
+            if not rows:
+                ax.axis("off")
+                continue
+            by_kind: Dict[str, List[Tuple[int, float]]] = defaultdict(list)
+            for row in rows:
+                by_kind[row["tensor"]].append((row["layer"], row["rel_l2"]))
+                csv_rows.append(
+                    {
+                        "model": model,
+                        "quant": quant,
+                        "layer": row["layer"],
+                        "tensor": row["tensor"],
+                        "rel_l2": row["rel_l2"],
+                    }
+                )
+            layers_all = sorted({layer for points in by_kind.values() for layer, _ in points})
+            mean_y = []
+            for layer in layers_all:
+                vals = [err for points in by_kind.values() for lyr, err in points if lyr == layer]
+                mean_y.append(float(np.mean(vals)) if vals else float("nan"))
+            for _, label, _, _ in _KIND_SPECS:
+                points = by_kind.get(label)
+                if not points:
+                    continue
+                points = sorted(points)
+                color, ls = _KIND_STYLE[label]
+                ax.plot(
+                    [p[0] for p in points],
+                    [p[1] for p in points],
+                    color=color,
+                    ls=ls,
+                    lw=1.15,
+                    label=label,
+                    zorder=2,
+                )
+            ax.plot(
+                layers_all,
+                mean_y,
+                color="#222222",
+                ls=":",
+                lw=1.6,
+                label="mean",
+                zorder=3,
+            )
+            if i == 0:
+                ax.set_title(quant, fontsize=11, fontweight="bold")
+            if j == 0:
+                ax.set_ylabel(f"{model}\nRelative L2 error", fontsize=9)
+            if i == n_models - 1:
+                ax.set_xlabel("Layer", fontsize=9)
+            mean_err = float(np.nanmean(mean_y)) if mean_y else float("nan")
+            ax.text(
+                0.97,
+                0.94,
+                f"mean={mean_err:.3f}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=8,
+                color="#444444",
+            )
+            _style_axes(ax)
+            if i == 0 and j == 0:
+                ax.legend(
+                    loc="upper left",
+                    fontsize=6.5,
+                    ncol=2,
+                    frameon=True,
+                    borderpad=0.3,
+                    labelspacing=0.25,
+                    handlelength=1.6,
+                )
+
+    fig.suptitle("Layer-wise quantization error vs FP16", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return _finish_plot(pd.DataFrame(csv_rows), output_path, "layerwise_quant_error.png")
+
+
 def generate_all_charts(
     results_file: Path,
     output_dir: Optional[Path] = None,
@@ -722,14 +1179,13 @@ def generate_all_charts(
 
     jobs = [
         ("perplexity_vs_size", plot_size_vs_quality, "perplexity_vs_size.png"),
-        ("throughput", plot_throughput_comparison, "throughput.png"),
-        ("latency", plot_latency, "latency.png"),
         ("compression", plot_compression_ratio, "compression.png"),
         ("perplexity_vs_throughput", plot_perplexity_vs_throughput, "perplexity_vs_throughput.png"),
         ("accuracy", plot_accuracy_vs_size, "accuracy.png"),
-        ("accuracy_vs_precision", plot_accuracy_vs_precision, "accuracy_vs_precision.png"),
         ("accuracy_drop", plot_accuracy_drop, "accuracy_drop.png"),
         ("accuracy_vs_throughput", plot_accuracy_vs_throughput, "accuracy_vs_throughput.png"),
+        ("weight_distribution", plot_weight_distributions, "weight_distribution.png"),
+        ("layerwise_quant_error", plot_layerwise_quant_error, "layerwise_quant_error.png"),
     ]
     chart_paths = {}
     for name, fn, filename in jobs:

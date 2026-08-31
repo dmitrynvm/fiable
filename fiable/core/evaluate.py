@@ -19,6 +19,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 from fiable.config.settings import (
@@ -46,6 +55,139 @@ WIKITEXT_ZIP_URL = (
     "https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitext-2-raw-v1.zip"
 )
 WIKITEXT_MIN_BYTES = 100_000
+GSM8K_TEST_SIZE = 1319
+_PPL_CHUNK_RE = re.compile(rb"\[(\d+)\](\d+\.\d+),")
+_PPL_TOTAL_RE = re.compile(
+    rb"(?:calculating perplexity|computing) over (\d+) chunks", re.IGNORECASE
+)
+_TQDM_RE = re.compile(rb"(\d+)\s*/\s*(\d+)")
+_KEEP_PPL_LOG = re.compile(
+    r"seconds per pass|Final estimate|tokeniz|failed|error|ETA ", re.I
+)
+
+
+def _eval_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=None),
+        MofNCompleteColumn(),
+        TextColumn("[green]{task.fields[detail]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        refresh_per_second=4,
+        expand=True,
+    )
+
+
+def _split_incomplete_ppl(buf: bytes) -> tuple[bytes, bytes]:
+    for i in range(1, min(24, len(buf)) + 1):
+        tail = buf[-i:]
+        if tail.startswith(b"[") and re.fullmatch(rb"\[\d*\]?\d*\.?\d*", tail):
+            return buf[:-i], tail
+    return buf, b""
+
+
+class _PerplexityEchoFilter:
+    """Drive a Rich bar from llama-perplexity chunk dumps; hide `[n]ppl,` spam."""
+
+    def __init__(self, progress: Progress, task_id: int, total: Optional[int] = None) -> None:
+        self.progress = progress
+        self.task_id = task_id
+        self._carry = b""
+        self._log_carry = ""
+        if total:
+            self.progress.update(self.task_id, total=total)
+
+    def _emit_logs(self, text: str) -> None:
+        self._log_carry += text
+        while "\n" in self._log_carry:
+            line, self._log_carry = self._log_carry.split("\n", 1)
+            stripped = line.strip()
+            if stripped and _KEEP_PPL_LOG.search(stripped):
+                self.progress.console.print(f"[dim]  {stripped}[/dim]")
+
+    def __call__(self, data: bytes) -> bytes:
+        complete, self._carry = _split_incomplete_ppl(self._carry + data)
+        for match in _PPL_TOTAL_RE.finditer(complete):
+            self.progress.update(self.task_id, total=int(match.group(1)))
+        last_end = 0
+        last_n = None
+        last_ppl = None
+        logs = bytearray()
+        for match in _PPL_CHUNK_RE.finditer(complete):
+            logs.extend(complete[last_end : match.start()])
+            last_n = int(match.group(1))
+            last_ppl = float(match.group(2))
+            last_end = match.end()
+        logs.extend(complete[last_end:])
+        if last_n is not None:
+            self.progress.update(
+                self.task_id,
+                completed=last_n,
+                description="perplexity",
+                detail=f"PPL {last_ppl:.2f}",
+            )
+        self._emit_logs(logs.decode("utf-8", errors="replace"))
+        return b""
+
+    def flush(self) -> bytes:
+        leftover = self._carry
+        self._carry = b""
+        if leftover:
+            self._emit_logs(leftover.decode("utf-8", errors="replace"))
+        if self._log_carry.strip() and _KEEP_PPL_LOG.search(self._log_carry):
+            self.progress.console.print(f"[dim]  {self._log_carry.strip()}[/dim]")
+        self._log_carry = ""
+        return b""
+
+
+class _LmEvalEchoFilter:
+    """Parse lm-eval / tqdm `n/total` into a Rich bar; keep a few INFO lines."""
+
+    def __init__(self, progress: Progress, task_id: int, total: Optional[int] = None) -> None:
+        self.progress = progress
+        self.task_id = task_id
+        self._buf = b""
+        if total:
+            self.progress.update(self.task_id, total=total)
+
+    def _handle_piece(self, piece: bytes) -> None:
+        text = piece.decode("utf-8", errors="replace").strip()
+        if not text:
+            return
+        match = _TQDM_RE.search(piece)
+        if match:
+            done, total = int(match.group(1)), int(match.group(2))
+            if total > 0:
+                self.progress.update(self.task_id, total=total, completed=done, detail="")
+            return
+        lowered = text.lower()
+        if "running generate_until" in lowered:
+            self.progress.update(self.task_id, description="gsm8k generate", detail="generating")
+            self.progress.console.print(f"[dim]  {text}[/dim]")
+            return
+        if "building contexts" in lowered:
+            self.progress.update(self.task_id, description="gsm8k setup", detail="building contexts")
+            self.progress.console.print(f"[dim]  {text}[/dim]")
+            return
+        if "error" in lowered or "failed" in lowered or "traceback" in lowered:
+            self.progress.console.print(f"[red]  {text}[/red]")
+
+    def __call__(self, data: bytes) -> bytes:
+        self._buf += data.replace(b"\r", b"\n")
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            self._handle_piece(line)
+        return b""
+
+    def flush(self) -> bytes:
+        if self._buf:
+            self._handle_piece(self._buf)
+            self._buf = b""
+        return b""
 
 
 @dataclass
@@ -67,6 +209,9 @@ class EvaluationResult:
     benchmarks: Dict[str, float] = field(default_factory=dict)
     benchmark_errors: Dict[str, str] = field(default_factory=dict)
     delta_acc: Dict[str, float] = field(default_factory=dict)
+    acc_retention: Dict[str, float] = field(default_factory=dict)
+    size_reduction: Optional[float] = None
+    efficiency_score: Dict[str, float] = field(default_factory=dict)
     throughput_tokens_per_sec: Optional[float] = None
     throughput_latency_ms: Optional[float] = None
     throughput_stddev: Optional[float] = None
@@ -75,6 +220,8 @@ class EvaluationResult:
     throughput_error: Optional[str] = None
     prefill_tokens_per_sec: Optional[float] = None
     ttft_ms: Optional[float] = None
+    speedup: Optional[float] = None
+    prefill_speedup: Optional[float] = None
     kl_divergence: Optional[float] = None
     top1_match: Optional[float] = None
     kl_divergence_error: Optional[str] = None
@@ -147,6 +294,21 @@ def _parse_bench_json(stdout: str) -> Optional[dict]:
     return decode
 
 
+def _run_stream_with_ppl_bar(
+    cmd: str,
+    description: str,
+    total: Optional[int] = None,
+) -> subprocess.CompletedProcess:
+    with _eval_progress() as progress:
+        task_id = progress.add_task(description, total=total, detail="")
+        return helpers.run_command(
+            cmd,
+            check=False,
+            stream=True,
+            echo_filter=_PerplexityEchoFilter(progress, task_id, total=total),
+        )
+
+
 def evaluate_perplexity(
     model_path: Path,
     dataset: str = "wikitext",
@@ -174,8 +336,10 @@ def evaluate_perplexity(
         )
         if chunks is not None:
             cmd += f" --chunks {int(chunks)}"
-        result = helpers.run_command(cmd, check=False)
+        started = time.time()
+        result = _run_stream_with_ppl_bar(cmd, f"perplexity ctx={context_size}", total=chunks)
         output = (result.stdout or "") + "\n" + (result.stderr or "")
+        console.print(f"[dim]  elapsed {helpers.format_duration(time.time() - started)}[/dim]")
 
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "unknown error").strip()
@@ -268,14 +432,25 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_http(url: str, timeout: float = 180.0) -> bool:
+def _wait_http(url: str, timeout: float = 180.0, label: str = "llama-server") -> bool:
     deadline = time.time() + timeout
+    started = time.time()
+    last_print = 0.0
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=2) as resp:
                 if 200 <= resp.status < 300:
+                    console.print(
+                        f"[dim]  {label} ready in {helpers.format_duration(time.time() - started)}[/dim]"
+                    )
                     return True
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            now = time.time()
+            if now - last_print >= 5:
+                console.print(
+                    f"[dim]  Waiting for {label} ({helpers.format_duration(now - started)})...[/dim]"
+                )
+                last_print = now
             time.sleep(1)
     return False
 
@@ -300,10 +475,14 @@ def _start_llama_server(model_path: Path) -> tuple[subprocess.Popen, int]:
         "--alias",
         "fiable-eval",
     ]
+    console.print(
+        f"[dim]  Starting llama-server {model_path.name} on 127.0.0.1:{port} "
+        f"(ctx={settings.LM_EVAL_MAX_LENGTH}, ngl=99)...[/dim]"
+    )
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
     )
     ready = _wait_http(f"http://127.0.0.1:{port}/health") or _wait_http(
@@ -326,9 +505,20 @@ def evaluate_benchmarks(
 ) -> tuple[Dict[str, float], Dict[str, str]]:
     """Evaluate GGUF models with lm-eval against a local llama-server."""
     if tasks is None:
-        tasks = ["mmlu", "gsm8k"]
+        tasks = ["gsm8k"]
 
-    console.print(f"[cyan]Running benchmarks: {', '.join(tasks)}...[/cyan]")
+    limit_note = f"limit={limit} examples/task" if limit else "full dataset"
+    console.print(
+        f"[cyan]Running benchmarks: {', '.join(tasks)} ({limit_note}, batch_size=1)...[/cyan]"
+    )
+    if not limit:
+        if "gsm8k" in tasks:
+            console.print(
+                f"[dim]  GSM8K test set is {GSM8K_TEST_SIZE} problems; "
+                "each generates a solution.[/dim]"
+            )
+        else:
+            console.print("[dim]  Full task set.[/dim]")
 
     scores: Dict[str, float] = {}
     errors: Dict[str, str] = {}
@@ -359,7 +549,26 @@ def evaluate_benchmarks(
             )
             if limit:
                 cmd += f" --limit {int(limit)}"
-            result = helpers.run_command(cmd, check=False)
+            if limit:
+                bar_total = int(limit) * max(len(lm_tasks), 1)
+            elif tasks == ["gsm8k"] or lm_tasks == ["gsm8k"]:
+                bar_total = GSM8K_TEST_SIZE
+            else:
+                bar_total = None
+            started = time.time()
+            with _eval_progress() as progress:
+                task_id = progress.add_task(
+                    "lm-eval", total=bar_total, detail="starting"
+                )
+                result = helpers.run_command(
+                    cmd,
+                    check=False,
+                    stream=True,
+                    echo_filter=_LmEvalEchoFilter(progress, task_id, total=bar_total),
+                )
+            console.print(
+                f"[dim]  lm-eval finished in {helpers.format_duration(time.time() - started)}[/dim]"
+            )
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "unknown error").strip()
                 for task in tasks:
@@ -429,8 +638,11 @@ def evaluate_throughput(
             f"-p {prompt_length} -n {n_gen} "
             f"-ngl 999 -o json -r 3"
         )
+        console.print("[dim]  llama-bench 3 reps (pp + tg), live output below[/dim]")
+        started = time.time()
         with peak_vram_sampler() as vram:
-            result = helpers.run_command(cmd, check=False)
+            result = helpers.run_command(cmd, check=False, stream=True)
+        console.print(f"[dim]  elapsed {helpers.format_duration(time.time() - started)}[/dim]")
         if vram.get("peak_vram_gb") is not None:
             empty["memory_gb"] = vram["peak_vram_gb"]
 
@@ -524,13 +736,14 @@ def evaluate_kl_vs_baseline(results: List[EvaluationResult], chunks: Optional[in
         console.print(
             f"[cyan]Dumping baseline logits for KL ({model_name} {baseline.quantization_type})...[/cyan]"
         )
-        dump = helpers.run_command(
+        dump = _run_stream_with_ppl_bar(
             f"{shlex.quote(str(ppl_bin))} "
             f"-m {shlex.quote(baseline.model_path)} "
             f"-f {shlex.quote(str(dataset_path))} "
             f"-c 512 -ngl 99 --chunks {int(chunks)} "
             f"--save-all-logits {shlex.quote(str(logits_path))}",
-            check=False,
+            "KL baseline logits",
+            total=int(chunks),
         )
         if dump.returncode != 0 or not logits_path.exists():
             err = (dump.stderr or dump.stdout or "failed to dump logits").strip()[:400]
@@ -545,13 +758,14 @@ def evaluate_kl_vs_baseline(results: List[EvaluationResult], chunks: Optional[in
                 console.print(f"[green]✓ KL {result.quantization_type}: 0.0000 (baseline)[/green]")
                 continue
             console.print(f"[cyan]KL divergence {result.quantization_type} vs {baseline.quantization_type}...[/cyan]")
-            cmp_ = helpers.run_command(
+            cmp_ = _run_stream_with_ppl_bar(
                 f"{shlex.quote(str(ppl_bin))} "
                 f"-m {shlex.quote(result.model_path)} "
                 f"-f {shlex.quote(str(dataset_path))} "
                 f"-c 512 -ngl 99 --chunks {int(chunks)} "
                 f"--kl-divergence --kl-divergence-base {shlex.quote(str(logits_path))}",
-                check=False,
+                f"KL {result.quantization_type}",
+                total=int(chunks),
             )
             output = (cmp_.stdout or "") + "\n" + (cmp_.stderr or "")
             kld, top1 = _parse_kl_output(output)
@@ -579,10 +793,13 @@ def evaluate_model(
     run_long_context: bool = True,
     dataset: str = "wikitext",
     benchmark_tasks: Optional[List[str]] = None,
-    benchmark_limit: Optional[int] = None,
+    limit: Optional[int] = None,
+    index: Optional[int] = None,
+    total: Optional[int] = None,
 ) -> EvaluationResult:
     """Run evaluation on a single model (relative metrics filled later)."""
-    console.print(f"\n[bold cyan]Evaluating {model_path.name}...[/bold cyan]")
+    prefix = f"[{index}/{total}] " if index is not None and total is not None else ""
+    console.print(f"\n[bold cyan]{prefix}Evaluating {model_path.name}...[/bold cyan]")
 
     model_name, quant_type = parse_model_identity(model_path)
     file_size = helpers.get_file_size_gb(model_path)
@@ -597,7 +814,7 @@ def evaluate_model(
     )
 
     if run_perplexity:
-        ppl, ppl_error = evaluate_perplexity(model_path, dataset)
+        ppl, ppl_error = evaluate_perplexity(model_path, dataset, chunks=limit)
         result.perplexity = ppl
         result.perplexity_error = ppl_error
 
@@ -606,13 +823,13 @@ def evaluate_model(
             model_path,
             dataset,
             context_size=settings.LONG_CONTEXT_SIZE,
-            chunks=2,
+            chunks=limit,
         )
         result.perplexity_long = long_ppl
         result.perplexity_long_error = long_err
 
     if run_benchmarks:
-        scores, errors = evaluate_benchmarks(model_path, benchmark_tasks, limit=benchmark_limit)
+        scores, errors = evaluate_benchmarks(model_path, benchmark_tasks, limit=limit)
         result.benchmarks = scores
         result.benchmark_errors = errors
 
@@ -629,6 +846,9 @@ def evaluate_model(
         if bench.get("n_params") and not result.n_params:
             result.n_params = bench["n_params"]
 
+    if index is not None and total is not None:
+        console.print(f"[dim]{prefix}{model_path.name} complete ({total - index} remaining)[/dim]")
+
     return result
 
 
@@ -641,10 +861,13 @@ def evaluate_models(
     run_kl: bool = True,
     dataset: str = "wikitext",
     benchmark_tasks: Optional[List[str]] = None,
+    limit: Optional[int] = None,
     benchmark_limit: Optional[int] = None,
     output_file: Optional[Path] = None,
 ) -> List[EvaluationResult]:
     """Evaluate multiple models and attach FP16-relative compression metrics."""
+    if limit is None:
+        limit = benchmark_limit
     needed = []
     if run_perplexity or run_long_context or run_kl:
         needed.append("llama-perplexity")
@@ -662,13 +885,32 @@ def evaluate_models(
             console.print(f"[red]Failed to build llama.cpp tools: {e}[/red]")
             return []
 
-    console.print(f"\n[bold]Evaluating {len(model_paths)} model(s)...[/bold]\n")
+    console.print(f"\n[bold]Evaluating {len(model_paths)} model(s)...[/bold]")
+    sample_note = f"{limit} samples" if limit else "full datasets"
+    console.print(f"[dim]Sample cap: {sample_note} (PPL chunks + accuracy examples)[/dim]")
+    per_model = []
+    if run_perplexity:
+        per_model.append("WikiText PPL ctx=512")
+    if run_long_context:
+        per_model.append(f"WikiText PPL ctx={settings.LONG_CONTEXT_SIZE}")
+    if run_benchmarks:
+        names = ",".join(benchmark_tasks or ["gsm8k"])
+        per_model.append(names)
+    if run_throughput:
+        per_model.append("llama-bench pp/tg")
+    if per_model:
+        console.print(f"[dim]Per model: {' → '.join(per_model)}[/dim]")
+    if run_kl:
+        console.print("[dim]After all models: KL vs FP16/Q8 baseline[/dim]")
+    console.print()
 
     results = []
-    for model_path in model_paths:
+    n_models = len(model_paths)
+    for i, model_path in enumerate(model_paths, 1):
         if not model_path.exists():
-            console.print(f"[red]Model not found: {model_path}[/red]")
+            console.print(f"[red][{i}/{n_models}] Model not found: {model_path}[/red]")
             continue
+        started = time.time()
         results.append(
             evaluate_model(
                 model_path,
@@ -678,8 +920,13 @@ def evaluate_models(
                 run_long_context=run_long_context,
                 dataset=dataset,
                 benchmark_tasks=benchmark_tasks,
-                benchmark_limit=benchmark_limit,
+                limit=limit,
+                index=i,
+                total=n_models,
             )
+        )
+        console.print(
+            f"[dim][{i}/{n_models}] wall time {helpers.format_duration(time.time() - started)}[/dim]"
         )
 
     annotate_relative_metrics(results)
@@ -710,6 +957,7 @@ def summary_row(result: EvaluationResult) -> Dict[str, Any]:
         "baseline": result.baseline_quant,
         "size_gb": _round(result.file_size_gb, 3),
         "compression_ratio": _round(result.compression_ratio, 3),
+        "size_reduction": _round(result.size_reduction, 4),
         "bits_per_weight": _round(result.bits_per_weight, 3),
         "perplexity": _round(result.perplexity, 4),
         "delta_ppl": _round(result.delta_ppl, 4),
@@ -719,12 +967,18 @@ def summary_row(result: EvaluationResult) -> Dict[str, Any]:
         "prefill_tok_s": _round(result.prefill_tokens_per_sec, 2),
         "decode_tok_s": _round(result.throughput_tokens_per_sec, 2),
         "latency_ms": _round(result.throughput_latency_ms, 2),
+        "speedup": _round(result.speedup, 3),
+        "prefill_speedup": _round(result.prefill_speedup, 3),
         "vram_gb": _round(result.peak_vram_gb or result.throughput_memory_gb, 2),
     }
     for task, score in (result.benchmarks or {}).items():
         row[f"acc_{task}"] = _round(score, 4)
     for task, delta in (result.delta_acc or {}).items():
         row[f"delta_acc_{task}"] = _round(delta, 4)
+    for task, ret in (result.acc_retention or {}).items():
+        row[f"acc_retention_{task}"] = _round(ret, 4)
+    for task, eff in (result.efficiency_score or {}).items():
+        row[f"efficiency_{task}"] = _round(eff, 4)
     return {k: v for k, v in row.items() if v is not None}
 
 
@@ -762,7 +1016,10 @@ def print_evaluation_summary(results: List[EvaluationResult]) -> None:
     for task in acc_tasks:
         table.add_column(task.upper(), justify="right")
         table.add_column(f"Δ{task.upper()}", justify="right")
+        table.add_column(f"Ret {task.upper()}", justify="right")
+        table.add_column(f"Eff {task.upper()}", justify="right")
     table.add_column("Decode", justify="right")
+    table.add_column("Speedup", justify="right")
     table.add_column("VRAM", justify="right")
 
     def _fmt(val: Optional[float], spec: str) -> str:
@@ -785,7 +1042,14 @@ def print_evaluation_summary(results: List[EvaluationResult]) -> None:
             cells.append(_fmt(acc, ".1%") if acc is not None else "N/A")
             delta = (result.delta_acc or {}).get(task)
             cells.append(_fmt(delta, "+.1%") if delta is not None else "N/A")
+            retention = (result.acc_retention or {}).get(task)
+            cells.append(_fmt(retention, ".1%") if retention is not None else "N/A")
+            efficiency = (result.efficiency_score or {}).get(task)
+            cells.append(_fmt(efficiency, ".1%") if efficiency is not None else "N/A")
         cells.append(_fmt(result.throughput_tokens_per_sec, ".1f"))
+        cells.append(
+            _fmt(result.speedup, ".2f") + ("x" if result.speedup is not None else "")
+        )
         cells.append(_fmt(result.peak_vram_gb or result.throughput_memory_gb, ".2f"))
         table.add_row(*cells)
 
