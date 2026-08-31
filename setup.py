@@ -25,6 +25,9 @@ setup(
         "accelerate>=0.26.0",
         "llama-cpp-python>=0.2.0",
         "nvidia-ml-py>=12.0.0",
+        "numpy>=2.0.0,<2.8.0",
+        "sentencepiece>=0.1.98,<0.3.0",
+        "protobuf>=4.21.0,<5.0.0",
     ],
     extras_require={
         "dev": [

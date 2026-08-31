@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from fiable.config.settings import CACHE_DIR, OUTPUT_DIR, QUANT_TYPES, MODELS, get_fp16_path
+from fiable.config.settings import STORE_DIR, OUTPUT_DIR, QUANT_TYPES, MODELS, get_fp16_path
 
 
 BASELINE_QUANTS = ("FP16", "F16", "BF16", "FP32", "F32")
@@ -58,7 +58,7 @@ def is_baseline_quant(quant: str) -> bool:
 
 
 def default_eval_paths() -> List[Path]:
-    """FP16 baselines plus quantized GGUFs in cache/."""
+    """FP16 baselines plus quantized GGUFs in store/."""
     seen = set()
     paths: List[Path] = []
     for model in MODELS:
@@ -67,7 +67,7 @@ def default_eval_paths() -> List[Path]:
             paths.append(fp16)
             seen.add(fp16.resolve())
     for pattern in ("*fp16.gguf", "*FP16.gguf", "*f16.gguf"):
-        for path in sorted(CACHE_DIR.glob(pattern)):
+        for path in sorted(STORE_DIR.glob(pattern)):
             if path.resolve() not in seen:
                 paths.append(path)
                 seen.add(path.resolve())

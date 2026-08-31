@@ -1,27 +1,46 @@
 """Configuration and constants for the compression pipeline."""
 
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+
+def _env_path(name: str, default: Path) -> Path:
+    value = os.environ.get(name)
+    return Path(value).expanduser().resolve() if value else default
+
+
+# Artifacts default to ./store and ./report in the process cwd.
+# Override with FIABLE_HOME, FIABLE_STORE_DIR, or FIABLE_REPORT_DIR.
+_ROOT = _env_path("FIABLE_HOME", Path.cwd())
+
+
+def _resolve_store_dir() -> Path:
+    """./store, migrating a legacy ./cache directory when present."""
+    if os.environ.get("FIABLE_STORE_DIR"):
+        return _env_path("FIABLE_STORE_DIR", _ROOT / "store")
+    store = (_ROOT / "store").resolve()
+    legacy = (_ROOT / "cache").resolve()
+    if not store.exists() and legacy.exists() and legacy.is_dir():
+        try:
+            legacy.rename(store)
+        except OSError:
+            return legacy
+    return store
 
 
 class Settings:
     """Global settings for Fiable."""
     
     # Directory paths
-    CACHE_DIR = Path("/workspace/cache")
-    OUTPUT_DIR = CACHE_DIR  # quantized GGUFs live next to FP16 in cache/
-    REPORT_DIR = Path("/workspace/report")
+    STORE_DIR = _resolve_store_dir()
+    OUTPUT_DIR = STORE_DIR  # quantized GGUFs live next to FP16 in store/
+    REPORT_DIR = _env_path("FIABLE_REPORT_DIR", _ROOT / "report")
     CHARTS_DIR = REPORT_DIR  # PNGs live next to evaluation.json
-    DATASETS_DIR = CACHE_DIR / "datasets"
-
-    # llama.cpp binaries
-    LLAMA_QUANTIZE = "/opt/llama.cpp/cuda-12.8/llama-quantize"
-    LLAMA_PERPLEXITY = "/opt/llama.cpp/cuda-12.8/llama-perplexity"
-    LLAMA_BENCH = "/opt/llama.cpp/cuda-12.8/llama-bench"
-    LLAMA_CLI = "/opt/llama.cpp/cuda-12.8/llama-cli"
-    LLAMA_SERVER = "/opt/llama.cpp/cuda-12.8/llama-server"
+    DATASETS_DIR = STORE_DIR / "datasets"
 
     LONG_CONTEXT_SIZE = 2048
     KL_CHUNKS = 1
@@ -98,20 +117,15 @@ settings.MODELS = [
 ]
 
 # Export constants for backward compatibility
-CACHE_DIR = settings.CACHE_DIR
+STORE_DIR = settings.STORE_DIR
 DATASETS_DIR = settings.DATASETS_DIR
 OUTPUT_DIR = settings.OUTPUT_DIR
 REPORT_DIR = settings.REPORT_DIR
 CHARTS_DIR = settings.CHARTS_DIR
 # Legacy names (deprecated)
-BASE_DIR = settings.CACHE_DIR
+BASE_DIR = settings.STORE_DIR
 COMPRESSED_DIR = settings.OUTPUT_DIR
 RESULTS_DIR = settings.REPORT_DIR
-LLAMA_QUANTIZE = settings.LLAMA_QUANTIZE
-LLAMA_PERPLEXITY = settings.LLAMA_PERPLEXITY
-LLAMA_BENCH = settings.LLAMA_BENCH
-LLAMA_CLI = settings.LLAMA_CLI
-LLAMA_SERVER = settings.LLAMA_SERVER
 EVAL_DATASETS = settings.EVAL_DATASETS
 BENCHMARK_TASKS = settings.BENCHMARK_TASKS
 CHART_DPI = settings.CHART_DPI
@@ -121,8 +135,116 @@ CHART_COLORS = settings.CHART_COLORS
 QUANT_TYPES = settings.QUANT_TYPES
 MODELS = settings.MODELS
 
-# Keep Hugging Face datasets under cache/
+# Keep Hugging Face datasets under store/
 os.environ.setdefault("HF_DATASETS_CACHE", str(settings.DATASETS_DIR))
+
+LLAMA_TOOLS = (
+    "llama-quantize",
+    "llama-perplexity",
+    "llama-bench",
+    "llama-cli",
+    "llama-server",
+)
+_OPT_LLAMA_DIR = Path("/opt/llama.cpp/cuda-12.8")
+
+
+def llama_src_dir() -> Path:
+    return settings.STORE_DIR / "llama.cpp"
+
+
+def llama_bin_dir() -> Path:
+    return llama_src_dir() / "build" / "bin"
+
+
+def llama_binary(name: str) -> Path:
+    """Resolve a llama.cpp tool: env, PATH, store build, then /opt."""
+    env_key = "FIABLE_" + name.upper().replace("-", "_")
+    override = os.environ.get(env_key)
+    if override:
+        return Path(override).expanduser().resolve()
+    found = shutil.which(name)
+    if found:
+        return Path(found).resolve()
+    built = llama_bin_dir() / name
+    if built.is_file():
+        return built
+    opt = _OPT_LLAMA_DIR / name
+    if opt.is_file():
+        return opt
+    return built
+
+
+def ensure_llama_src() -> Path:
+    """Clone llama.cpp into store/ if needed. Returns the source directory."""
+    src = llama_src_dir()
+    if not src.exists():
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "https://github.com/ggerganov/llama.cpp.git",
+                str(src),
+            ],
+            check=True,
+        )
+    return src
+
+
+def _want_cuda() -> bool:
+    if os.environ.get("FIABLE_NO_CUDA", "").lower() in {"1", "true", "yes"}:
+        return False
+    if shutil.which("nvcc"):
+        return True
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home and (Path(cuda_home) / "bin" / "nvcc").is_file():
+        return True
+    return False
+
+
+def ensure_llama_tools(names: Optional[List[str]] = None) -> Dict[str, Path]:
+    """Build missing llama.cpp tools into store/llama.cpp/build/bin."""
+    names = list(names or LLAMA_TOOLS)
+    src = ensure_llama_src()
+    resolved = {name: llama_binary(name) for name in names}
+    if all(path.is_file() for path in resolved.values()):
+        return resolved
+
+    build_dir = src / "build"
+    cmake_args = [
+        "cmake",
+        "-S",
+        str(src),
+        "-B",
+        str(build_dir),
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DLLAMA_BUILD_EXAMPLES=OFF",
+        "-DLLAMA_BUILD_TOOLS=ON",
+        "-DGGML_CCACHE=OFF",
+    ]
+    if _want_cuda():
+        cmake_args.append("-DGGML_CUDA=ON")
+    subprocess.run(cmake_args, check=True)
+
+    jobs = str(os.cpu_count() or 4)
+    build = subprocess.run(
+        ["cmake", "--build", str(build_dir), "-j", jobs, "--target", *names],
+    )
+    if build.returncode != 0:
+        subprocess.run(
+            ["cmake", "--build", str(build_dir), "-j", jobs, "--target", "llama-quantize"],
+            check=True,
+        )
+
+    resolved = {name: llama_binary(name) for name in names}
+    missing = [name for name, path in resolved.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "llama.cpp tools missing after build: "
+            + ", ".join(f"{n} ({resolved[n]})" for n in missing)
+        )
+    return resolved
 
 
 def get_model_by_name(name: str) -> ModelConfig:
@@ -135,7 +257,7 @@ def get_model_by_name(name: str) -> ModelConfig:
 
 def get_fp16_path(model: ModelConfig) -> Path:
     """Get path to FP16 GGUF file for a model."""
-    return settings.CACHE_DIR / model.fp16_filename
+    return settings.STORE_DIR / model.fp16_filename
 
 
 def get_quantized_path(model: ModelConfig, quant_type: str) -> Path:

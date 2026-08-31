@@ -24,10 +24,8 @@ from rich.table import Table
 from fiable.config.settings import (
     BENCHMARK_TASKS,
     DATASETS_DIR,
-    LLAMA_BENCH,
-    LLAMA_PERPLEXITY,
-    LLAMA_SERVER,
     REPORT_DIR,
+    llama_binary,
     settings,
 )
 from fiable.core.metrics import (
@@ -158,8 +156,9 @@ def evaluate_perplexity(
     label = f"{dataset} ctx={context_size}"
     console.print(f"[cyan]Evaluating perplexity ({label})...[/cyan]")
 
-    if not Path(LLAMA_PERPLEXITY).exists():
-        return None, f"llama-perplexity binary not found: {LLAMA_PERPLEXITY}"
+    ppl_bin = llama_binary("llama-perplexity")
+    if not ppl_bin.is_file():
+        return None, f"llama-perplexity binary not found: {ppl_bin}"
 
     try:
         if dataset != "wikitext":
@@ -167,7 +166,7 @@ def evaluate_perplexity(
         dataset_path = _ensure_wikitext()
 
         cmd = (
-            f"{shlex.quote(LLAMA_PERPLEXITY)} "
+            f"{shlex.quote(str(ppl_bin))} "
             f"-m {shlex.quote(str(model_path))} "
             f"-f {shlex.quote(str(dataset_path))} "
             f"-c {context_size} -ngl 99"
@@ -281,11 +280,12 @@ def _wait_http(url: str, timeout: float = 180.0) -> bool:
 
 
 def _start_llama_server(model_path: Path) -> tuple[subprocess.Popen, int]:
-    if not Path(LLAMA_SERVER).exists():
-        raise FileNotFoundError(f"llama-server binary not found: {LLAMA_SERVER}")
+    server_bin = llama_binary("llama-server")
+    if not server_bin.is_file():
+        raise FileNotFoundError(f"llama-server binary not found: {server_bin}")
     port = _free_port()
     cmd = [
-        LLAMA_SERVER,
+        str(server_bin),
         "-m",
         str(model_path),
         "--host",
@@ -416,13 +416,14 @@ def evaluate_throughput(
         "error": None,
     }
 
-    if not Path(LLAMA_BENCH).exists():
-        empty["error"] = f"llama-bench binary not found: {LLAMA_BENCH}"
+    bench_bin = llama_binary("llama-bench")
+    if not bench_bin.is_file():
+        empty["error"] = f"llama-bench binary not found: {bench_bin}"
         return empty
 
     try:
         cmd = (
-            f"{shlex.quote(LLAMA_BENCH)} "
+            f"{shlex.quote(str(bench_bin))} "
             f"-m {shlex.quote(str(model_path))} "
             f"-p {prompt_length} -n {n_gen} "
             f"-ngl 999 -o json -r 3"
@@ -494,9 +495,10 @@ def evaluate_kl_vs_baseline(results: List[EvaluationResult], chunks: Optional[in
     """Dump FP16 logits once per family, then KL-diverge each quant against them."""
     if chunks is None:
         chunks = settings.KL_CHUNKS
-    if not Path(LLAMA_PERPLEXITY).exists():
+    ppl_bin = llama_binary("llama-perplexity")
+    if not ppl_bin.is_file():
         for result in results:
-            result.kl_divergence_error = f"llama-perplexity binary not found: {LLAMA_PERPLEXITY}"
+            result.kl_divergence_error = f"llama-perplexity binary not found: {ppl_bin}"
         return
 
     try:
@@ -522,7 +524,7 @@ def evaluate_kl_vs_baseline(results: List[EvaluationResult], chunks: Optional[in
             f"[cyan]Dumping baseline logits for KL ({model_name} {baseline.quantization_type})...[/cyan]"
         )
         dump = helpers.run_command(
-            f"{shlex.quote(LLAMA_PERPLEXITY)} "
+            f"{shlex.quote(str(ppl_bin))} "
             f"-m {shlex.quote(baseline.model_path)} "
             f"-f {shlex.quote(str(dataset_path))} "
             f"-c 512 -ngl 99 --chunks {int(chunks)} "
@@ -543,7 +545,7 @@ def evaluate_kl_vs_baseline(results: List[EvaluationResult], chunks: Optional[in
                 continue
             console.print(f"[cyan]KL divergence {result.quantization_type} vs {baseline.quantization_type}...[/cyan]")
             cmp_ = helpers.run_command(
-                f"{shlex.quote(LLAMA_PERPLEXITY)} "
+                f"{shlex.quote(str(ppl_bin))} "
                 f"-m {shlex.quote(result.model_path)} "
                 f"-f {shlex.quote(str(dataset_path))} "
                 f"-c 512 -ngl 99 --chunks {int(chunks)} "

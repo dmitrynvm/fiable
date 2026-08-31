@@ -1,5 +1,6 @@
 """Model quantization functionality with metadata tracking."""
 
+import sys
 import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -10,14 +11,16 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from fiable.config import settings
 from fiable.config.settings import (
     ModelConfig,
-    CACHE_DIR,
+    STORE_DIR,
     OUTPUT_DIR,
-    LLAMA_QUANTIZE,
     MODELS,
     QUANT_TYPES,
     get_model_by_name,
     get_fp16_path,
     get_quantized_path,
+    ensure_llama_src,
+    ensure_llama_tools,
+    llama_binary,
 )
 from fiable.utils import helpers
 
@@ -45,6 +48,24 @@ class QuantizationResult:
         return data
 
 
+def _ensure_hf_convert_deps() -> None:
+    """Install extras needed by convert_hf_to_gguf.py without llama.cpp's numpy/torch pins."""
+    missing = []
+    for package, import_name in (
+        ("sentencepiece", "sentencepiece"),
+        ("protobuf", "google.protobuf"),
+    ):
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(package)
+    if missing:
+        helpers.run_command(
+            [sys.executable, "-m", "pip", "install", "-q", *missing],
+            shell=False,
+        )
+
+
 def convert_to_gguf(model: ModelConfig, force: bool = False) -> Tuple[bool, Optional[Path]]:
     """
     Convert HuggingFace model to GGUF FP16 format.
@@ -65,21 +86,20 @@ def convert_to_gguf(model: ModelConfig, force: bool = False) -> Tuple[bool, Opti
     
     console.print(f"[cyan]Converting {model.name} to GGUF FP16...[/cyan]")
     
-    # Clone llama.cpp repo if needed
-    llama_cpp_dir = CACHE_DIR / "llama.cpp"
-    if not llama_cpp_dir.exists():
-        console.print("[dim]Cloning llama.cpp repository...[/dim]")
-        try:
-            helpers.run_command(
-                f"git clone https://github.com/ggerganov/llama.cpp.git {llama_cpp_dir}"
-            )
-            helpers.run_command(f"pip install -q -r {llama_cpp_dir}/requirements.txt")
-        except Exception as e:
-            console.print(f"[red]Failed to clone llama.cpp: {e}[/red]")
-            return False, None
+    try:
+        llama_cpp_dir = ensure_llama_src()
+    except Exception as e:
+        console.print(f"[red]Failed to clone llama.cpp: {e}[/red]")
+        return False, None
+
+    try:
+        _ensure_hf_convert_deps()
+    except Exception as e:
+        console.print(f"[red]Failed to install conversion dependencies: {e}[/red]")
+        return False, None
     
     # Convert model
-    model_dir = CACHE_DIR / model.local_dir
+    model_dir = STORE_DIR / model.local_dir
     convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
     
     if not model_dir.exists():
@@ -88,8 +108,16 @@ def convert_to_gguf(model: ModelConfig, force: bool = False) -> Tuple[bool, Opti
         return False, None
     
     try:
-        cmd = f"python3 {convert_script} {model_dir} --outfile {fp16_path} --outtype f16"
-        helpers.run_command(cmd)
+        cmd = [
+            sys.executable,
+            str(convert_script),
+            str(model_dir),
+            "--outfile",
+            str(fp16_path),
+            "--outtype",
+            "f16",
+        ]
+        helpers.run_command(cmd, shell=False, capture_output=False)
         console.print(f"[green]✓ Converted to FP16 GGUF: {fp16_path}[/green]")
         return True, fp16_path
     except Exception as e:
@@ -133,10 +161,19 @@ def quantize_model(
     console.print(f"[cyan]Creating {quant_type} quantization...[/cyan]")
     
     start_time = time.time()
+    quantize_bin = llama_binary("llama-quantize")
+    if not quantize_bin.is_file():
+        console.print(f"[red]✗ llama-quantize not found: {quantize_bin}[/red]")
+        return QuantizationResult(
+            model_name=model.name,
+            quantization_type=quant_type,
+            success=False,
+            error=f"llama-quantize not found: {quantize_bin}",
+        )
     
     try:
-        cmd = f"{LLAMA_QUANTIZE} {fp16_path} {output_path} {quant_type}"
-        result = helpers.run_command(cmd, check=False)
+        cmd = [str(quantize_bin), str(fp16_path), str(output_path), quant_type]
+        result = helpers.run_command(cmd, check=False, shell=False)
         
         duration = time.time() - start_time
         
@@ -155,12 +192,15 @@ def quantize_model(
                 duration_seconds=duration,
             )
         else:
+            err = (result.stderr or result.stdout or "unknown error").strip()
             console.print(f"[red]✗ Failed to create {quant_type}[/red]")
+            if err:
+                console.print(f"[dim]{err[:500]}[/dim]")
             return QuantizationResult(
                 model_name=model.name,
                 quantization_type=quant_type,
                 success=False,
-                error=result.stderr,
+                error=err,
                 duration_seconds=duration,
             )
             
@@ -215,6 +255,14 @@ def quantize_models(
     
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    console.print("[dim]Ensuring llama-quantize is available...[/dim]")
+    try:
+        tools = ensure_llama_tools(["llama-quantize"])
+        console.print(f"[dim]Using {tools['llama-quantize']}[/dim]\n")
+    except Exception as e:
+        console.print(f"[red]Failed to build llama-quantize: {e}[/red]")
+        return []
     
     console.print(
         f"\n[bold]Quantizing {len(models_to_quantize)} model(s) "
@@ -259,7 +307,7 @@ def quantize_models(
 
 
 def list_quantized_models() -> List[Path]:
-    """List quantized GGUF models in cache (excludes FP16/BF16 sources)."""
+    """List quantized GGUF models in store (excludes FP16/BF16 sources)."""
     if not OUTPUT_DIR.exists():
         return []
     from fiable.core.metrics import is_baseline_quant, parse_model_identity

@@ -12,8 +12,8 @@ cd fiable
 pip install -e .
 
 # Use
-fiable
-fiable cache
+fiable help
+fiable store
 fiable download
 ```
 
@@ -24,7 +24,7 @@ fiable download
 This follows the standard Python project layout:
 
 ```
-/workspace/fiable/              ← Project directory (work here!)
+fiable/                         ← Project directory
 ├── fiable/                     ← Package code
 │   ├── cli/                    ← Command-line interface
 │   │   └── commands.py         ← All CLI commands
@@ -34,8 +34,7 @@ This follows the standard Python project layout:
 │   │   ├── download.py         ← HuggingFace downloads
 │   │   ├── quantize.py         ← GGUF quantization
 │   │   ├── evaluate.py         ← Model evaluation
-│   │   ├── metrics.py          ← Compression deltas, NVML, Pareto
-│   │   └── profile.py          ← Prefill vs decode profiling
+│   │   └── metrics.py          ← Compression deltas, NVML, Pareto
 │   ├── utils/                  ← Utilities
 │   │   └── helpers.py          ← Helper functions
 │   └── visual/                 ← Charts & plots
@@ -50,9 +49,15 @@ This follows the standard Python project layout:
 
 ### Typical Workflow
 
+Artifacts are written under the **current working directory**: `./store` and `./report`.
+
 ```bash
-# 1. List cache (downloads, quants, datasets)
-fiable cache
+# 0. Show commands
+fiable help
+fiable help download
+
+# 1. List store (downloads, quants, datasets)
+fiable store
 
 # 2. Download models
 fiable download
@@ -63,10 +68,7 @@ fiable quantize --types "Q4_K_M,Q5_K_M"
 # 4. Evaluate models (defaults to all)
 fiable evaluate
 
-# 5. Prefill vs decode (FP16 vs Q4_K_M)
-fiable profile --no-nsys -o report/exp2_profile.json
-
-# 6. View results in report/
+# 5. View results in report/
 ```
 
 ### Download Models
@@ -98,15 +100,14 @@ fiable quantize --force
 ### Evaluate Models
 
 ```bash
-# Evaluate all models in cache/ → report/evaluation.json
+# Evaluate all models in store/ → report/evaluation.json
 fiable evaluate
 
 # Evaluate specific models
-fiable evaluate cache/*Q4_K_M.gguf
-```
+fiable evaluate store/*Q4_K_M.gguf
 
 # Evaluate with custom options
-fiable evaluate cache/llama-3.1-8b-instruct-Q4_K_M.gguf --no-benchmarks --dataset wikitext
+fiable evaluate store/llama-3.1-8b-instruct-Q4_K_M.gguf --no-benchmarks --dataset wikitext
 ```
 
 ### Generate Visualizations
@@ -119,7 +120,7 @@ fiable plot
 ### List Information
 
 ```bash
-fiable cache  # Each artifact: type, size, file
+fiable store  # Each artifact: type, size, file
 ```
 
 ---
@@ -174,8 +175,21 @@ settings.QUANT_TYPES = ["Q4_K_M", "Q5_K_M", "Q8_0"]
 
 ### Configure Paths
 
+Defaults are `./store` and `./report` in the process working directory.
+
+```bash
+export FIABLE_HOME=/path/to/workdir          # store/ and report/ under here
+export FIABLE_STORE_DIR=/path/to/store
+export FIABLE_REPORT_DIR=/path/to/report
+```
+
+Or in Python:
+
 ```python
-settings.CACHE_DIR = Path("/custom/cache")
+from pathlib import Path
+from fiable.config.settings import settings
+
+settings.STORE_DIR = Path("/custom/store")
 settings.REPORT_DIR = Path("/custom/report")
 ```
 
@@ -191,6 +205,15 @@ settings.REPORT_DIR = Path("/custom/report")
 ---
 
 ## 🎨 CLI Commands Reference
+
+### Help Command
+```bash
+fiable help
+fiable help download
+fiable help quantize
+```
+
+Shows the same information as `COMMAND --help`.
 
 ### Download Command
 ```bash
@@ -214,10 +237,10 @@ fiable quantize [MODEL_NAMES...] [OPTIONS]
 fiable evaluate [MODEL_PATHS...] [OPTIONS]
 ```
 
-By default, evaluates **all GGUF files in `cache/`** (FP16 baselines and quants).
+By default, evaluates **all GGUF files in `store/`** (FP16 baselines and quants).
 
 **Options:**
-- `MODEL_PATHS` - Optional: specific GGUF paths (default: cache/*.gguf)
+- `MODEL_PATHS` - Optional: specific GGUF paths (default: store/*.gguf)
 - `--perplexity/--no-perplexity` - WikiText-2 perplexity at ctx=512 (default: true)
 - `--long-context/--no-long-context` - Perplexity at ctx=2048 (default: true)
 - `--benchmarks/--no-benchmarks` - lm-eval via llama-server (default: true)
@@ -238,36 +261,17 @@ Defaults to `report/evaluation.json`.
 **Options:**
 - `--output-dir, -o PATH` - Output directory for charts (default: `report/`)
 
-### Profile Command (prefill vs decode)
-```bash
-fiable profile [MODEL_PATHS...] [OPTIONS]
-```
-
-Defaults to `cache/*fp16.gguf` and `cache/*Q4_K_M.gguf`. Measures time-to-first-token (prefill) and inter-token latency (decode).
-
-```bash
-fiable profile
-fiable profile --no-nsys -o report/exp2_profile.json
-fiable evaluate cache/*fp16.gguf cache/*Q4_K_M.gguf --no-benchmarks -o report/exp2_bench.json
-```
-
-**Prefill vs decode:** prefill is usually compute-bound (Q4 can be slower than FP16 because of dequant). Decode is usually memory-bound (Q4 is often faster because 4-bit weights move less data from HBM).
-
-**Options:**
-- `--nsys/--no-nsys` - Try Nsight Systems on a short llama-bench if `nsys` is installed
-- `--output, -o PATH` - Output JSON
-
 ---
 
 ## 📁 Output Files
 
 ### Directory Structure
 ```
-/workspace/
-├── cache/                      # FP16, quantized GGUFs, datasets, downloads
+./                              # current working directory
+├── store/                      # FP16, quantized GGUFs, datasets, downloads
 │   └── datasets/               # WikiText and Hugging Face datasets
-├── report/                     # evaluation.json, chart PNGs + CSVs
-│   └── evaluation.json
+└── report/                     # evaluation.json, chart PNGs + CSVs
+    └── evaluation.json
 ```
 
 ### Evaluation report (`report/evaluation.json`)
@@ -314,8 +318,8 @@ Each chart in `report/` has a PNG and a CSV of the plotted points:
 ### Running from Source
 ```bash
 # Without installation
-cd /workspace/fiable
-python -m fiable --help
+cd fiable
+python -m fiable help
 
 # Check imports
 python -c "import fiable; print(fiable.__version__)"
@@ -354,7 +358,7 @@ huggingface-cli login
 ### Missing Dependencies
 ```bash
 # Reinstall
-cd /workspace/fiable
+cd fiable
 pip install -e .
 ```
 
@@ -371,7 +375,7 @@ fiable quantize "Llama 3.1 8B" --types "Q4_K_M"
 ### Import Errors
 ```bash
 # Verify installation
-cd /workspace/fiable
+cd fiable
 pip install -e .
 python -c "import fiable; print('OK')"
 ```
@@ -384,10 +388,10 @@ python -c "import fiable; print('OK')"
 
 ```bash
 # Start from scratch
-cd /workspace/fiable
+cd fiable
 
 # 1. Check configured models
-fiable cache
+fiable store
 
 # 2. Download a specific model
 fiable download "Llama 3.1 8B"
@@ -408,10 +412,10 @@ fiable plot
 fiable evaluate
 
 # Evaluate all Q4_K_M models into the same report
-fiable evaluate cache/*Q4_K_M.gguf
+fiable evaluate store/*Q4_K_M.gguf
 
 # Evaluate a model family
-fiable evaluate cache/llama*.gguf
+fiable evaluate store/llama*.gguf
 ```
 
 ### Generate Charts from the Report
@@ -471,6 +475,9 @@ fiable plot
 - accelerate>=0.26.0 - Hugging Face accelerate
 - llama-cpp-python>=0.2.0 - Optional GGUF Python bindings
 - nvidia-ml-py>=12.0.0 - NVML peak VRAM during llama-bench
+- numpy>=2.0.0,<2.8.0 - Required for transformers tokenizer export
+- sentencepiece>=0.1.98 - HF → GGUF conversion vocabs
+- protobuf>=4.21.0 - GGUF metadata
 
 ---
 
@@ -493,10 +500,10 @@ Built with:
 
 ## 🚀 Getting Started Checklist
 
-- [ ] Navigate to project: `cd /workspace/fiable`
+- [ ] Navigate to project: `cd fiable`
 - [ ] Install package: `pip install -e .`
-- [ ] Test CLI: `fiable --help`
-- [ ] List cache: `fiable cache`
+- [ ] Test CLI: `fiable help`
+- [ ] List store: `fiable store`
 - [ ] Configure models in `fiable/config/settings.py`
 - [ ] Download models: `fiable download`
 - [ ] View results in `report/`
@@ -506,7 +513,7 @@ Built with:
 **Ready to compress some models?**
 
 ```bash
-cd /workspace/fiable
-fiable cache    # See cached artifacts
+cd fiable
+fiable store    # See stored artifacts
 fiable download     # Start downloading
 ```

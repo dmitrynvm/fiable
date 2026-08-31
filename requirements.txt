@@ -14,3 +14,10 @@ transformers>=4.40.0
 accelerate>=0.26.0
 llama-cpp-python>=0.2.0
 nvidia-ml-py>=12.0.0
+
+# GGUF conversion (convert_hf_to_gguf.py). numpy>=2 is required so
+# transformers can import AutoTokenizer; llama.cpp pins numpy~=1.26
+# which breaks SciPy/scikit-learn and tokenizer export.
+numpy>=2.0.0,<2.8.0
+sentencepiece>=0.1.98,<0.3.0
+protobuf>=4.21.0,<5.0.0

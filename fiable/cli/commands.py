@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from fiable.config import settings
-from fiable.core import download, quantize, evaluate, profile
+from fiable.core import download, quantize, evaluate
 from fiable.core.metrics import is_baseline_quant, parse_model_identity
 from fiable.visual import plots
 from fiable import utils
@@ -22,6 +22,27 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@app.command("help")
+def help_cmd(
+    command: Optional[str] = typer.Argument(
+        None,
+        help="Command to show help for (download, quantize, evaluate, plot, store)",
+    ),
+):
+    """
+    Show help for fiable or a specific command.
+
+    Example:
+        fiable help
+        fiable help download
+    """
+    args = [command, "--help"] if command else ["--help"]
+    try:
+        app(args, standalone_mode=False)
+    except typer.Exit as exc:
+        raise typer.Exit(exc.exit_code) from exc
 
 
 @app.command(name="download")
@@ -84,7 +105,7 @@ def quantize_cmd(
 def evaluate_cmd(
     model_paths: Optional[List[Path]] = typer.Argument(
         None,
-        help="GGUF paths (default: all *.gguf in cache/)",
+        help="GGUF paths (default: all *.gguf in store/)",
     ),
     perplexity: bool = typer.Option(
         True,
@@ -138,11 +159,11 @@ def evaluate_cmd(
     """
     Evaluate quantized models against an FP16 baseline.
 
-    By default, evaluates all GGUF files in cache/ (FP16 + quants).
+    By default, evaluates all GGUF files in store/ (FP16 + quants).
 
     Example:
         fiable evaluate
-        fiable evaluate cache/*Q4_K_M.gguf --no-benchmarks
+        fiable evaluate store/*Q4_K_M.gguf --no-benchmarks
         fiable evaluate --tasks gsm8k --limit 50
     """
     console.print("[bold cyan]Evaluating models...[/bold cyan]\n")
@@ -150,11 +171,11 @@ def evaluate_cmd(
     if model_paths is None or len(model_paths) == 0:
         model_paths = evaluate.default_eval_paths()
         if not model_paths:
-            console.print("[red]No GGUF models found in cache/[/red]")
+            console.print("[red]No GGUF models found in store/[/red]")
             console.print("[yellow]Run 'fiable quantize' first to create quantized models.[/yellow]")
             raise typer.Exit(1)
         console.print(
-            f"[dim]Evaluating {len(model_paths)} model(s) in cache/[/dim]\n"
+            f"[dim]Evaluating {len(model_paths)} model(s) in store/[/dim]\n"
         )
 
     benchmark_tasks = [t.strip() for t in tasks.split(",")] if tasks else None
@@ -202,34 +223,6 @@ def plot(
         raise typer.Exit(1)
 
     plots.generate_all_charts(results_file, output_dir)
-
-
-@app.command("profile")
-def profile_cmd(
-    model_paths: Optional[List[Path]] = typer.Argument(
-        None,
-        help="GGUF paths (default: cache/*fp16.gguf and cache/*Q4_K_M.gguf)",
-    ),
-    output: Optional[Path] = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="Output JSON file",
-    ),
-    nsys: bool = typer.Option(
-        True,
-        "--nsys/--no-nsys",
-        help="Try Nsight Systems around a short llama-bench if nsys exists",
-    ),
-):
-    """
-    Profile prefill vs decode: TTFT and inter-token latency (FP16 vs Q4_K_M).
-    
-    Example:
-        fiable profile
-        fiable profile --no-nsys -o report/exp2_profile.json
-    """
-    profile.profile_models(model_paths, output_file=output, nsys=nsys)
 
 
 def _quantized_by_model():
@@ -280,13 +273,13 @@ def _source_type_label(path: Path) -> str:
     return "FP16"
 
 
-@app.command("cache")
-def cache_cmd():
+@app.command("store")
+def store_cmd():
     """
-    List cached artifacts: Model, Status (type), Size, File.
+    List stored artifacts: Model, Status (type), Size, File.
     
     Example:
-        fiable cache
+        fiable store
     """
     quantized, unmatched = _quantized_by_model()
 
@@ -297,8 +290,8 @@ def cache_cmd():
     table.add_column("File", style="dim", no_wrap=True)
 
     for model in settings.MODELS:
-        model_dir = settings.CACHE_DIR / model.local_dir
-        fp16_path = settings.CACHE_DIR / model.fp16_filename
+        model_dir = settings.STORE_DIR / model.local_dir
+        fp16_path = settings.STORE_DIR / model.fp16_filename
         if fp16_path.exists():
             source_path = fp16_path
         elif model_dir.exists():
@@ -351,7 +344,7 @@ def cache_cmd():
             size = utils.helpers.get_file_size_gb(path)
             table.add_row(
                 "dataset",
-                "[cyan]cached[/cyan]",
+                "[cyan]local[/cyan]",
                 f"{size:.2f}",
                 path.name,
             )

@@ -11,7 +11,7 @@ import pandas as pd
 from rich.console import Console
 
 from fiable.utils import helpers
-from fiable.config.settings import CACHE_DIR, CHARTS_DIR, CHART_DPI, CHART_COLORS, MODELS
+from fiable.config.settings import STORE_DIR, CHARTS_DIR, CHART_DPI, CHART_COLORS, MODELS
 from fiable.core.evaluate import EvaluationResult
 from fiable.core.metrics import annotate_relative_metrics, read_gguf_parameter_count
 
@@ -108,12 +108,17 @@ def _style_axes(ax, y_only: bool = False) -> None:
 
 
 def _resolve_model_path(path_str: str) -> str:
-    """Map legacy /workspace/output/... paths onto cache/ if needed."""
+    """Map legacy cache/ and /workspace/output/... paths onto store/ if needed."""
     path = Path(path_str)
     if path.exists():
         return str(path)
     name = path.name
-    for candidate in (CACHE_DIR / name, Path("/workspace/cache") / name):
+    for candidate in (
+        STORE_DIR / name,
+        Path.cwd() / "store" / name,
+        Path.cwd() / "cache" / name,
+        Path("/workspace/cache") / name,
+    ):
         if candidate.exists():
             return str(candidate)
     return path_str

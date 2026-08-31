@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from fiable.config import settings
-from fiable.config.settings import ModelConfig, CACHE_DIR, MODELS
+from fiable.config.settings import ModelConfig, STORE_DIR, MODELS
 from fiable.utils import helpers
 
 
@@ -36,7 +36,7 @@ def download_model(model: ModelConfig, force: bool = False) -> DownloadResult:
     Returns:
         DownloadResult with success status
     """
-    model_dir = CACHE_DIR / model.local_dir
+    model_dir = STORE_DIR / model.local_dir
     
     # Check if already exists
     if model_dir.exists() and not force:
@@ -120,7 +120,7 @@ def download_models(
         return []
     
     # Ensure base directory exists
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
     
     console.print(f"\n[bold]Downloading {len(models_to_download)} model(s)...[/bold]\n")
     
@@ -149,7 +149,7 @@ def list_downloaded_models() -> List[ModelConfig]:
     """List all downloaded models."""
     downloaded = []
     for model in MODELS:
-        model_dir = CACHE_DIR / model.local_dir
+        model_dir = STORE_DIR / model.local_dir
         if model_dir.exists():
             downloaded.append(model)
     return downloaded
