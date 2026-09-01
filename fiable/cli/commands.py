@@ -80,7 +80,7 @@ def quantize_cmd(
         None,
         "--types",
         "-t",
-        help="Comma-separated types: W4A16, Q4_K_M, …",
+        help="Comma-separated types (default: Q4_K_M, GPTQ_4, EVOPRESS_4)",
     ),
     force: bool = typer.Option(
         False,
@@ -117,7 +117,7 @@ def quantize_cmd(
 def evaluate_cmd(
     model_paths: Optional[List[Path]] = typer.Argument(
         None,
-        help="GGUF paths (default: all *.gguf in store/)",
+        help="GGUF paths (default: FP16 + Q4_K_M, GPTQ_4, EVOPRESS_4)",
     ),
     perplexity: bool = typer.Option(
         True,
@@ -284,6 +284,12 @@ def _quantized_by_model():
             if path.name.startswith(prefix):
                 quant_type = path.stem[len(model.quant_prefix) + 1 :]
                 size = utils.helpers.get_file_size_gb(path)
+                try:
+                    from fiable.core.gptq import effective_size_gb
+
+                    size = effective_size_gb(path)
+                except Exception:
+                    pass
                 grouped[model.name].append((quant_type, path, size))
                 matched = True
                 break
@@ -375,17 +381,32 @@ def store_cmd():
             table.add_row(model.name, "[dim]None[/dim]", "—", "—", "—")
 
         files_by_type = {q: (path, size) for q, path, size in quantized.get(model.name, [])}
-        for quant_type in settings.QUANT_TYPES:
+        listed_types = (
+            list(settings.QUANT_TYPES)
+            + list(settings.GPTQ_TYPES)
+            + list(settings.EVOPRESS_TYPES)
+        )
+        for quant_type in listed_types:
             if quant_type not in files_by_type:
                 continue
             path, size = files_by_type[quant_type]
             add_row(model.name, quant_type, f"{size:.2f}", path.name)
 
     for path in unmatched:
-        size = utils.helpers.get_file_size_gb(path)
+        try:
+            from fiable.core.gptq import effective_size_gb
+
+            size = effective_size_gb(path)
+        except Exception:
+            size = utils.helpers.get_file_size_gb(path)
         stem = path.stem
+        listed = (
+            list(settings.QUANT_TYPES)
+            + list(settings.GPTQ_TYPES)
+            + list(settings.EVOPRESS_TYPES)
+        )
         quant_type = next(
-            (q for q in settings.QUANT_TYPES if stem.endswith(f"-{q}")),
+            (q for q in listed if stem.endswith(f"-{q}")),
             "unknown",
         )
         add_row("Other", quant_type, f"{size:.2f}", path.name)

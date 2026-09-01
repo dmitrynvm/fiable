@@ -36,6 +36,7 @@ from fiable.config.settings import (
     REPORT_DIR,
     llama_binary,
     ensure_llama_tools,
+    is_gptq_type,
     settings,
 )
 from fiable.core.metrics import (
@@ -231,25 +232,28 @@ class EvaluationResult:
         return asdict(self)
 
 
-def _ensure_wikitext() -> Path:
-    """Download WikiText-2 test split if missing. Raises on failure."""
-    text_path = DATASETS_DIR / "wiki.test.raw"
+def _ensure_wikitext(split: str = "test") -> Path:
+    """Download WikiText-2 raw split if missing. Raises on failure."""
+    if split not in {"train", "valid", "test"}:
+        raise ValueError(f"Unknown WikiText split: {split}")
+    filename = f"wiki.{split}.raw"
+    text_path = DATASETS_DIR / filename
     if text_path.exists() and text_path.stat().st_size >= WIKITEXT_MIN_BYTES:
         return text_path
 
     text_path.parent.mkdir(parents=True, exist_ok=True)
     zip_path = text_path.parent / "wikitext-2-raw-v1.zip"
     if not zip_path.exists():
-        console.print("[cyan]Downloading WikiText-2 (wiki.test.raw)...[/cyan]")
+        console.print(f"[cyan]Downloading WikiText-2 ({filename})...[/cyan]")
         urllib.request.urlretrieve(WIKITEXT_ZIP_URL, zip_path)
 
     with zipfile.ZipFile(zip_path) as zf:
         member = next(
-            (n for n in zf.namelist() if n.endswith("wiki.test.raw")),
+            (n for n in zf.namelist() if n.endswith(filename)),
             None,
         )
         if member is None:
-            raise FileNotFoundError("wiki.test.raw not found in WikiText zip")
+            raise FileNotFoundError(f"{filename} not found in WikiText zip")
         with zf.open(member) as src, open(text_path, "wb") as dst:
             dst.write(src.read())
 
@@ -802,7 +806,9 @@ def evaluate_model(
     console.print(f"\n[bold cyan]{prefix}Evaluating {model_path.name}...[/bold cyan]")
 
     model_name, quant_type = parse_model_identity(model_path)
-    file_size = helpers.get_file_size_gb(model_path)
+    from fiable.core.gptq import effective_size_gb
+
+    file_size = effective_size_gb(model_path)
     n_params = read_gguf_parameter_count(model_path)
 
     result = EvaluationResult(
@@ -834,17 +840,24 @@ def evaluate_model(
         result.benchmark_errors = errors
 
     if run_throughput:
-        bench = evaluate_throughput(model_path)
-        result.prefill_tokens_per_sec = bench["prefill_tokens_per_sec"]
-        result.ttft_ms = bench["ttft_ms"]
-        result.throughput_tokens_per_sec = bench["decode_tokens_per_sec"]
-        result.throughput_latency_ms = bench["decode_latency_ms"]
-        result.throughput_stddev = bench["decode_stddev"]
-        result.throughput_memory_gb = bench["memory_gb"]
-        result.peak_vram_gb = bench["memory_gb"]
-        result.throughput_error = bench["error"]
-        if bench.get("n_params") and not result.n_params:
-            result.n_params = bench["n_params"]
+        if is_gptq_type(quant_type):
+            console.print(
+                "[yellow]Skipping llama-bench for GPTQ "
+                "(GGUF is dequant F16; kernels would not be GPTQ)[/yellow]"
+            )
+            result.throughput_error = "skipped: GPTQ GGUF is reconstructed F16, not GPTQ kernels"
+        else:
+            bench = evaluate_throughput(model_path)
+            result.prefill_tokens_per_sec = bench["prefill_tokens_per_sec"]
+            result.ttft_ms = bench["ttft_ms"]
+            result.throughput_tokens_per_sec = bench["decode_tokens_per_sec"]
+            result.throughput_latency_ms = bench["decode_latency_ms"]
+            result.throughput_stddev = bench["decode_stddev"]
+            result.throughput_memory_gb = bench["memory_gb"]
+            result.peak_vram_gb = bench["memory_gb"]
+            result.throughput_error = bench["error"]
+            if bench.get("n_params") and not result.n_params:
+                result.n_params = bench["n_params"]
 
     if index is not None and total is not None:
         console.print(f"[dim]{prefix}{model_path.name} complete ({total - index} remaining)[/dim]")

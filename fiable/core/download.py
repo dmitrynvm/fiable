@@ -1,5 +1,6 @@
 """Model downloading functionality with progress tracking."""
 
+import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -60,6 +61,7 @@ def download_model(model: ModelConfig, force: bool = False) -> DownloadResult:
             local_dir=str(model_dir),
             local_dir_use_symlinks=False,
             resume_download=True,
+            token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
         )
         
         console.print(f"[green]✓ Downloaded {model.name} successfully[/green]")

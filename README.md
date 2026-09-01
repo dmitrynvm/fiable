@@ -5,539 +5,118 @@ A comprehensive CLI tool for downloading, quantizing, evaluating, and visualizin
 ## Quick Start
 
 ```bash
-# Navigate to project
+git clone git@github.com:dmitrynvm/fiable.git
 cd fiable
-
-# Install
-pip install -e .
-
-# Use
-fiable help
-fiable store
+bash install.sh
+export HF_TOKEN=...
 fiable download
-```
-
----
-
-## 📦 Project Structure
-
-This follows the standard Python project layout:
-
-```
-fiable/                         ← Project directory
-├── fiable/                     ← Package code
-│   ├── cli/                    ← Command-line interface
-│   │   └── commands.py         ← All CLI commands
-│   ├── config/                 ← Configuration
-│   │   └── settings.py         ← Settings & ModelConfig
-│   ├── core/                   ← Core business logic
-│   │   ├── download.py         ← HuggingFace downloads
-│   │   ├── quantize.py         ← GGUF quantization
-│   │   ├── evaluate.py         ← Model evaluation
-│   │   └── metrics.py          ← Compression deltas, NVML, Pareto
-│   ├── utils/                  ← Utilities
-│   │   └── helpers.py          ← Helper functions
-│   └── visual/                 ← Charts & plots
-│       └── plots.py            ← Chart generation
-├── setup.py                    ← Installation script
-├── pyproject.toml              ← Modern packaging config
-├── requirements.txt            ← Dependencies
-└── README.md                   ← This file
-```
-
-## 📖 Usage
-
-### Typical Workflow
-
-Artifacts are written under the **current working directory**: `./store` and `./report`.
-
-```bash
-# 0. Show commands
-fiable help
-fiable help download
-
-# 1. List store (downloads, quants, datasets)
-fiable store
-
-# 2. Download models
-fiable download
-
-# 3. Quantize models
-fiable quantize --types "Q4_K_M,Q5_K_M"
-
-# 4. Evaluate models (defaults to all) — also writes PNG charts to report/
-fiable evaluate
-
-# 5. View results and charts in report/
-```
-
-### Download Models
-
-```bash
-# Download all configured models
-fiable download
-
-# Download specific models
-fiable download "Llama 3.1 8B" "Qwen 2.5 7B"
-
-# Force re-download
-fiable download --force
-```
-
-### Quantize Models
-
-```bash
-# Quantize all downloaded models
 fiable quantize
-
-# Quantize with specific types
-fiable quantize "Llama 3.1 8B" --types "Q4_K_M,Q5_K_M"
-
-# Force re-quantization
-fiable quantize --force
-```
-
-### Evaluate Models
-
-```bash
-# Evaluate all models in store/ → report/evaluation.json
-fiable evaluate
-
-# Evaluate specific models
-fiable evaluate store/*Q4_K_M.gguf
-
-# Evaluate with custom options
-fiable evaluate store/llama-3.1-8b-instruct-Q4_K_M.gguf --no-benchmarks --dataset wikitext
 fiable evaluate --limit 50
-```
-
-### Generate Visualizations
-
-`fiable evaluate` writes PNG/CSV charts to `report/` when it finishes. To regenerate without re-running eval:
-
-```bash
-fiable plot
-```
-
-### List Information
-
-```bash
-fiable store  # Each artifact: type, size, file
-```
-
----
-
-## 🐍 Python API
-
-```python
-# Import modules
-from fiable.core import download, quantize, evaluate
-from fiable.config import settings
-from fiable.utils import helpers
-from fiable.visual import plots
-
-# Download models
-results = download.download_models()
-
-# Quantize models
-quant_results = quantize.quantize_models()
-
-# Evaluate models
-eval_results = evaluate.evaluate_models(model_paths)
-
-# Generate charts
-plots.generate_all_charts(results_file)
-```
-
----
-
-## ⚙️ Configuration
-
-Edit `fiable/config/settings.py` to customize:
-
-### Add Models
-
-```python
-from fiable.config.settings import ModelConfig, settings
-
-settings.MODELS.append(ModelConfig(
-    name="Your Model",
-    repo="org/model-name",
-    local_dir="local-directory",
-    fp16_filename="model-fp16.gguf",
-    quant_prefix="model-prefix",
-))
-```
-
-### Modify Quantization Types
-
-```python
-settings.QUANT_TYPES = ["Q4_K_M", "Q5_K_M", "Q8_0"]
-```
-
-### Configure Paths
-
-Defaults are `./store` and `./report` in the process working directory.
-
-```bash
-export FIABLE_HOME=/path/to/workdir          # store/ and report/ under here
-export FIABLE_STORE_DIR=/path/to/store
-export FIABLE_REPORT_DIR=/path/to/report
-```
-
-Or in Python:
-
-```python
-from pathlib import Path
-from fiable.config.settings import settings
-
-settings.STORE_DIR = Path("/custom/store")
-settings.REPORT_DIR = Path("/custom/report")
-```
-
----
-
-## 📊 Models & Quantization
-
-### Configured Models
-
-1. **Llama 3.1 8B Instruct** - Excellent for general chat and English tasks
-2. **Qwen 2.5 7B Instruct** - Superior for code generation and math reasoning
-
----
-
-## 🎨 CLI Commands Reference
-
-### Help Command
-```bash
-fiable help
-fiable help download
-fiable help quantize
-```
-
-Shows the same information as `COMMAND --help`.
-
-### Download Command
-```bash
-fiable download [MODEL_NAMES...] [OPTIONS]
-```
-
-**Options:**
-- `--force, -f` - Force re-download even if exists
-
-### Quantize Command
-```bash
-fiable quantize [MODEL_NAMES...] [OPTIONS]
-```
-
-**Options:**
-- `--types, -t TEXT` - Comma-separated types: `W4A16`, `Q4_K_M`, … (`W4A16` → Q4_K_M)
-- `--force, -f` - Force re-quantization even if exists
-
-### Evaluate Command
-```bash
-fiable evaluate [MODEL_PATHS...] [OPTIONS]
-```
-
-By default, evaluates **all GGUF files in `store/`** (FP16 baselines and quants).
-
-**Options:**
-- `MODEL_PATHS` - Optional: specific GGUF paths (default: store/*.gguf)
-- `--perplexity/--no-perplexity` - WikiText-2 perplexity at ctx=512 (default: true)
-- `--long-context/--no-long-context` - Perplexity at ctx=2048 (default: true)
-- `--benchmarks/--no-benchmarks` - lm-eval via llama-server (default: true)
-- `--throughput/--no-throughput` - llama-bench + NVML peak VRAM (default: true)
-- `--kl/--no-kl` - KL divergence vs FP16/Q8 logits (default: true)
-- `--dataset, -d TEXT` - Dataset for perplexity
-- `--tasks, -t TEXT` - Comma-separated accuracy tasks (default: gsm8k)
-
-Accuracy comes from **lm-eval** over `llama-server` (GSM8K = `exact_match`; optional MMLU = `acc`, HumanEval = `pass@1`). Scores land in `report/evaluation.json` as `acc_<task>`, `delta_acc_<task>` (absolute drop vs FP16), `acc_retention_<task>` (`A_comp / A_orig`), and `efficiency_<task>` (harmonic mean of retention and size reduction). The summary table shows `GSM8K` / `ΔGSM8K` / `Ret GSM8K` / `Eff GSM8K`.
-
-Add a task in `fiable/config/settings.py`:
-
-```python
-settings.BENCHMARK_TASKS["arc_easy"] = ["arc_easy"]
-```
-
-Then:
-
-```bash
-fiable evaluate --tasks gsm8k,arc_easy
-# or a smoke test (50 WikiText chunks + 50 GSM8K problems)
-fiable evaluate --limit 50
-```
-- `--limit, -n INTEGER` - Cap WikiText PPL chunks and accuracy examples (omit for full datasets)
-- `--output, -o PATH` - Output JSON (default: `report/evaluation.json`)
-- `--plot/--no-plot` - Write PNG/CSV charts to `report/` after evaluation (default: plot)
-
-### Plot Command
-```bash
-fiable plot [RESULTS_FILE] [OPTIONS]
-```
-
-Defaults to `report/evaluation.json`. Charts are also generated automatically at the end of `fiable evaluate`. Use this command to rebuild PNGs after editing the report.
-
-**Options:**
-- `--output-dir, -o PATH` - Output directory for charts (default: `report/`)
-
----
-
-## 📁 Output Files
-
-### Directory Structure
-```
-./                              # current working directory
-├── store/                      # FP16, quantized GGUFs, datasets, downloads
-│   └── datasets/               # WikiText and Hugging Face datasets
-└── report/                     # evaluation.json, chart PNGs + CSVs
-    └── evaluation.json
-```
-
-### Evaluation report (`report/evaluation.json`)
-One file: a compact `summary` table plus full `results`.
-
-```json
-{
-  "generated_at": "2026-08-31T08:42:00",
-  "n_models": 2,
-  "summary": [
-    {
-      "model": "llama-3.1-8b-instruct",
-      "quant": "Q4_K_M",
-      "baseline": "FP16",
-      "size_gb": 4.58,
-      "compression_ratio": 3.26,
-      "bits_per_weight": 4.92,
-      "perplexity": 7.53,
-      "delta_ppl": 0.028,
-      "kl_divergence": 0.031,
-      "decode_tok_s": 262.4,
-      "latency_ms": 3.81,
-      "speedup": 1.42,
-      "vram_gb": 5.1
-    }
-  ],
-  "results": [{ "...": "full per-model metrics" }]
-}
-```
-
-Relative fields (`compression_ratio`, `size_reduction`, `delta_ppl`, `delta_acc`, `acc_retention`, `efficiency`, `speedup`, `kl_divergence`) are vs the family's FP16 baseline, or Q8_0 if FP16 is missing. `speedup` is decode latency \(L_{\text{orig}} / L_{\text{comp}}\) from llama-bench (ms/tok). Efficiency is the harmonic mean of accuracy retention and size reduction \((S_{\text{orig}} - S_{\text{comp}}) / S_{\text{orig}}\).
-
-### Generated Charts
-Each chart in `report/` has a PNG and a CSV of the plotted points:
-- `perplexity_vs_size.png` / `.csv` — Perplexity vs Size
-- `compression.png` / `.csv` — Compression
-- `perplexity_vs_throughput.png` / `.csv` — Perplexity vs Throughput
-- `accuracy.png` / `.csv` — Accuracy vs Size
-- `accuracy_drop.png` / `.csv` — Accuracy drop vs FP16 by quantization method
-- `accuracy_vs_throughput.png` / `.csv` — Accuracy vs Throughput
-- `weight_distribution.png` / `.csv` — Weight value histograms per quantization method
-- `layerwise_quant_error.png` / `.csv` — Layer-wise relative L2 error vs FP16 per model and method
-
----
-
-## 🔧 Development
-
-### Running from Source
-```bash
-# Without installation
-cd fiable
-python -m fiable help
-
-# Check imports
-python -c "import fiable; print(fiable.__version__)"
-```
-
-### Adding Custom Evaluation Datasets
-```python
-# In fiable/config/settings.py
-settings.EVAL_DATASETS = {
-    "wikitext": "wikitext-2-raw-v1",
-    "custom": "path/to/dataset",
-}
-```
-
-### Module Structure
-
-- **`cli/`** - User interface and command definitions
-- **`config/`** - Configuration management and settings
-- **`core/`** - Business logic (download, quantize, evaluate)
-- **`utils/`** - Shared utility functions
-- **`visual/`** - Chart generation and plotting
-
----
-
-## 🐛 Troubleshooting
-
-### Authentication Issues
-```bash
-# Set HuggingFace token
-export HF_TOKEN=your_token_here
-
-# Or login via CLI
-huggingface-cli login
-```
-
-### Missing Dependencies
-```bash
-# Reinstall
-cd fiable
-pip install -e .
-```
-
-### Disk Space Issues
-- Process one model at a time
-- Delete original models after conversion
-- Only keep needed quantization types
-
-```bash
-fiable download "Llama 3.1 8B"
-fiable quantize "Llama 3.1 8B" --types "Q4_K_M"
-```
-
-### Import Errors
-```bash
-# Verify installation
-cd fiable
-pip install -e .
-python -c "import fiable; print('OK')"
-```
-
----
-
-## 📝 Examples
-
-### Complete Workflow
-
-```bash
-# Start from scratch
-cd fiable
-
-# 1. Check configured models
 fiable store
-
-# 2. Download a specific model
-fiable download "Llama 3.1 8B"
-
-# 3. Quantize to recommended format
-fiable quantize "Llama 3.1 8B" --types "Q4_K_M"
-
-# 4. Evaluate all quantized models (writes report/evaluation.json + PNG charts)
-fiable evaluate
-
-# 5. Regenerate charts only (optional)
-fiable plot
 ```
 
-### Batch Evaluation
-```bash
-# Evaluate all models (writes report/evaluation.json)
-fiable evaluate
+`install.sh` installs cmake/build tools, cuBLAS headers (`CUDA::cublas`) when CUDA is present, and the CLI. Quantize uses `/opt/llama.cpp` binaries when they already exist; set `FIABLE_BUILD_LLAMA=1` to compile from `store/llama.cpp` instead.
 
-# Evaluate all Q4_K_M models into the same report
-fiable evaluate store/*Q4_K_M.gguf
+Default `fiable quantize` / `fiable evaluate` compare **Q4_K_M**, **GPTQ_4**, and **EVOPRESS_4** against FP16. Other GGUF types (`Q8_0`, `Q6_K`, …) remain available with `--types`. GPTQ needs `pip install fiable[gptq]` and CUDA torch. EvoPress builds extra uniform GGUFs as a search database; those files are not in the default eval table.
 
-# Evaluate a model family
-fiable evaluate store/llama*.gguf
-```
+## Quantization methods
 
-### Generate Charts from the Report
-```bash
-# Rebuild PNGs without re-running evaluation
-fiable plot
-```
+| Method | One-line meaning |
+| --- | --- |
+| **FP16** | 16-bit floating-point weights; essentially the unquantized baseline. |
+| **Q8_0** | 8-bit symmetric block quantization using one scale per block; very low quantization error. |
+| **Q6_K** | 6-bit K-quant using hierarchical blocks/superblocks and per-block scaling for better efficiency. |
+| **Q5_K_M** | ~5-bit K-quant with **mixed precision**, using higher precision for selected sensitive tensors. |
+| **Q4_K_M** | ~4-bit K-quant with **mixed precision**; a popular balance between model size and quality. |
+| **GPTQ_4** | Calibrated 4-bit GPTQ (group 128, act-order) on WikiText-2 **train**; not a llama.cpp `llama-quantize` type. |
+| **EVOPRESS_4** | EvoPress mixed-precision: evolutionary per-block mix of `{Q2_K…Q6_K}` targeting ~4-bit average. |
+| **Q3_K_M** | ~3-bit K-quant with **mixed precision**; more aggressive compression with noticeably higher quantization error. |
+| **Q2_K** | ~2-bit K-quant with very aggressive compression; high memory savings but substantially more quality loss. |
 
----
+### Even shorter version
 
-## 🏗️ Architecture Benefits
+| Method | Meaning |
+| --- | --- |
+| **FP16** | Full 16-bit precision |
+| **Q8_0** | 8-bit block quantization |
+| **Q6_K** | 6-bit hierarchical K-quantization |
+| **Q5_K_M** | 5-bit K-quant + mixed tensor precision |
+| **Q4_K_M** | 4-bit K-quant + mixed tensor precision |
+| **GPTQ_4** | 4-bit GPTQ (g128, calibrated) |
+| **EVOPRESS_4** | Mixed GGUF types, ~4-bit EvoPress |
+| **Q3_K_M** | 3-bit K-quant + mixed tensor precision |
+| **Q2_K** | 2-bit K-quantization |
 
-### Modularity
-- Clear separation between CLI, config, core logic, utils, and visualization
-- Each module has a single, focused responsibility
+**Key:** `K` = K-quantization family; `M` = mixed tensor types, not simply “medium quality.” Default comparison is **Q4_K_M** (uniform K-quant recipe) vs **GPTQ_4** (calibrated 4-bit, WikiText-2 train) vs **EVOPRESS_4** (evolutionary per-block mix targeting ~4-bit). GPTQ eval PPL/KL/lm-eval use a dequantized F16 GGUF of reconstructed weights; `size_gb` / bits come from the packed checkpoint; prefill/decode are omitted. EvoPress stitches a mixed K-quant GGUF, so PPL **and** llama-bench are comparable to Q4_K_M.
 
-### Scalability
-- Easy to add new modules or features
-- Can split large files into sub-modules
-- Clear growth path for the codebase
+`W4A16` on the CLI still means **Q4_K_M**, not GPTQ or EvoPress.
 
-### Maintainability
-- Intuitive file organization
-- Clear where to add new features
-- Logical import paths
+## Evaluation report fields
 
-### Testability
-- Easy to test individual modules
-- Clear dependency boundaries
-- Simple mocking for unit tests
+`fiable evaluate` writes `report/evaluation.json`. The `summary` array is one row per GGUF. Relative fields (`compression_ratio`, `delta_*`, `speedup`, …) compare that row to the family’s **baseline** (FP16/BF16 if present, else Q8_0, else the largest file).
 
-### Professional
-- Follows Python packaging best practices
-- Standard project structure (like requests/, flask/, django/)
-- Modern packaging with pyproject.toml
+### Identity
 
----
+| Field | Meaning |
+| --- | --- |
+| `model` | Model family id from the GGUF name (`llama-3.1-8b-instruct`). |
+| `quant` | GGUF weight scheme of this file (`FP16`, `Q4_K_M`, …). |
+| `baseline` | Scheme used as the uncompressed reference for this family. |
 
-## 📦 Package Info
+### Size
 
-- **Name:** fiable
-- **Version:** 0.1.0
-- **Python:** 3.8+
-- **License:** MIT
-- **Entry Point:** `fiable` (command-line)
+| Field | Meaning |
+| --- | --- |
+| `size_gb` | On-disk GGUF size in GiB. |
+| `compression_ratio` | `baseline_size / size_gb`. Baseline is `1.0`; `5.0` means 5× smaller. |
+| `size_reduction` | Fraction of baseline size removed: `1 - size / baseline_size`. Baseline is `0`; `0.80` is an 80% smaller file. |
+| `bits_per_weight` | `8 × file_bytes / n_params`. FP16 is ~16; K-quants sit a bit above their nominal bit width because of scales and super-blocks. |
 
-### Dependencies
-- typer>=0.12.0 - CLI framework
-- rich>=13.7.0 - Terminal formatting
-- huggingface_hub>=0.23.0 - Model downloads
-- matplotlib>=3.8.0 - Chart generation
-- seaborn>=0.13.0 - Statistical visualization
-- pandas>=2.0.0 - Data manipulation
-- lm-eval>=0.4.0 - MMLU / GSM8K / HumanEval harness
-- datasets>=2.14.0 - Hugging Face datasets (WikiText, benchmarks)
-- evaluate>=0.4.0 - Hugging Face evaluate metrics
-- transformers>=4.40.0 - Model/tokenizer support for lm-eval
-- accelerate>=0.26.0 - Hugging Face accelerate
-- llama-cpp-python>=0.2.0 - Optional GGUF Python bindings
-- nvidia-ml-py>=12.0.0 - NVML peak VRAM during llama-bench
-- numpy>=2.0.0,<2.8.0 - Required for transformers tokenizer export
-- sentencepiece>=0.1.98 - HF → GGUF conversion vocabs
-- protobuf>=4.21.0 - GGUF metadata
+### Quality (WikiText-2 via `llama-perplexity`)
 
----
+| Field | Meaning |
+| --- | --- |
+| `perplexity` | Next-token perplexity at context **512**. Lower is better. |
+| `delta_ppl` | Relative PPL change vs baseline: `ppl / ppl_baseline - 1`. Baseline is `0`; `0.39` is 39% worse. |
+| `perplexity_long` | Same metric at context **2048** (`LONG_CONTEXT_SIZE`). |
+| `kl_divergence` | Mean KL(baseline ‖ quant) on WikiText logits (`--kl-divergence`). `0` on the baseline; higher means the quantized next-token distribution drifted more. |
+| `top1_match` | Fraction of tokens where the quant and baseline share the same top-1 token (`Same top p` / 100). Baseline is `1.0`. |
 
-## 📄 License
+### Speed / memory (`llama-bench`: prompt 512, generate 128, 3 reps)
 
-MIT License - See LICENSE file for details.
+| Field | Meaning |
+| --- | --- |
+| `prefill_tok_s` | Prompt-processing (pp) throughput, tokens/s. |
+| `decode_tok_s` | Token-generation (tg) throughput, tokens/s. |
+| `latency_ms` | Decode latency, `1000 / decode_tok_s` (ms per token). |
+| `speedup` | Decode speed vs baseline: `latency_baseline / latency`. Baseline is `1.0`. |
+| `prefill_speedup` | Prefill speed vs baseline from estimated TTFT (`n_prompt / prefill_tok_s`). Baseline is `1.0`. Values `< 1` mean slower prefill than FP16 (common for low-bit kernels). |
+| `vram_gb` | Peak GPU memory during the bench (NVML sampler, else llama-bench’s reported memory). |
 
----
+### Task accuracy (lm-eval; task name is the suffix)
 
-## 🙏 Credits
+| Field | Meaning |
+| --- | --- |
+| `acc_<task>` | Score on that task (`acc_gsm8k`, `acc_mmlu`, `acc_humaneval`, …). With `--limit 50` this is a short sample, not a full run. |
+| `delta_acc_<task>` | Absolute drop vs baseline: `acc_baseline - acc`. Baseline is `0`; **positive** means the quant scored worse. |
+| `acc_retention_<task>` | `acc / acc_baseline`. Baseline is `1.0`; `0.71` kept 71% of baseline accuracy. |
+| `efficiency_<task>` | Harmonic mean of `acc_retention_<task>` and `size_reduction`. High when the file is much smaller **and** accuracy is mostly kept. Omitted on the baseline (`size_reduction` is 0). |
 
-Built with:
-- [Typer](https://typer.tiangolo.com/) - CLI framework
-- [Rich](https://rich.readthedocs.io/) - Terminal formatting
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - Model quantization
-- [Hugging Face](https://huggingface.co/) - Model hub
-- [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) - Benchmark evaluation
+On an FP16 baseline row: `compression_ratio = 1`, `delta_ppl = 0`, `kl_divergence = 0`, `top1_match = 1`, `speedup = 1`, `acc_retention_gsm8k = 1`.
 
----
+## Charts (`fiable plot`)
 
-## 🚀 Getting Started Checklist
+PNG + CSV files land in `report/`. Research plots (no extra eval):
 
-- [ ] Navigate to project: `cd fiable`
-- [ ] Install package: `pip install -e .`
-- [ ] Test CLI: `fiable help`
-- [ ] List store: `fiable store`
-- [ ] Configure models in `fiable/config/settings.py`
-- [ ] Download models: `fiable download`
-- [ ] View results in `report/`
+| Chart | File | Question |
+| --- | --- | --- |
+| Master comparison | `comparison.png` | All models × measures × GGUF methods in one table |
+| Relative PPL vs bits | `delta_ppl_vs_bits.png` | Quality loss as bit-width drops (comparable across models) |
+| Perplexity drop vs FP16 | `perplexity_drop.png` | Same ΔPPL by GGUF method (not by bits) |
+| KL and top-1 vs bits | `kl_top1_vs_bits.png` | Next-token distribution drift |
+| Prefill vs decode | `prefill_vs_decode.png` | Decode can speed up while prefill slows vs FP16 |
+| Short vs long PPL | `perplexity_short_vs_long.png` | Whether error grows from ctx 512 to 2048 |
+| Compression–quality Pareto | `efficiency_pareto.png` | Which quants sit on the size vs PPL-retention front |
 
----
+Accuracy vs size / throughput / drop use lm-eval scores. **With `--limit 50` those three charts are exploratory** (high binomial noise); they are labeled as such and should not rank quants until you rerun without `--limit` (and add `mmlu` / `humaneval` if needed).
 
-**Ready to compress some models?**
-
-```bash
-cd fiable
-fiable store    # See stored artifacts
-fiable download     # Start downloading
-```

@@ -72,8 +72,12 @@ class Settings:
         "#8c564b",  # tab:brown
     ]
 
-    # Quantization types
+    # GGML ladder (still used as EvoPress layer database / --types).
     QUANT_TYPES: List[str] = ["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"]
+    GPTQ_TYPES: List[str] = ["GPTQ_4"]
+    EVOPRESS_TYPES: List[str] = ["EVOPRESS_4"]
+    # Default `fiable quantize` / `fiable evaluate` comparison set.
+    DEFAULT_QUANT_TYPES: List[str] = ["Q4_K_M", "GPTQ_4", "EVOPRESS_4"]
 
     # Available models
     MODELS: List["ModelConfig"] = []
@@ -134,7 +138,27 @@ CHART_STYLE = settings.CHART_STYLE
 CHART_PALETTE = settings.CHART_PALETTE
 CHART_COLORS = settings.CHART_COLORS
 QUANT_TYPES = settings.QUANT_TYPES
+GPTQ_TYPES = settings.GPTQ_TYPES
+EVOPRESS_TYPES = settings.EVOPRESS_TYPES
+DEFAULT_QUANT_TYPES = settings.DEFAULT_QUANT_TYPES
 MODELS = settings.MODELS
+
+_GPTQ_ALIASES = {
+    "GPTQ": "GPTQ_4",
+    "GPTQ4": "GPTQ_4",
+    "GPTQ_4": "GPTQ_4",
+}
+_GPTQ_TO_WA = {
+    "GPTQ_4": "W4A16 g128",
+}
+_EVOPRESS_ALIASES = {
+    "EVOPRESS": "EVOPRESS_4",
+    "EVOPRESS4": "EVOPRESS_4",
+    "EVOPRESS_4": "EVOPRESS_4",
+}
+_EVOPRESS_TO_WA = {
+    "EVOPRESS_4": "W4A16 evo",
+}
 
 # GGUF is weight-only; activations stay F16 at runtime (W*A16).
 _GGUF_TO_WA = {
@@ -169,9 +193,32 @@ _WA_TO_GGUF = {
 _WA_RE = re.compile(r"^W(\d+)A(\d+)(?:G(\d+))?$", re.IGNORECASE)
 
 
+def is_gptq_type(quant: str) -> bool:
+    """True for GPTQ_* methods (not llama-quantize GGUF types)."""
+    key = (quant or "").strip().upper().replace("-", "_").replace(" ", "")
+    return key in _GPTQ_ALIASES or key.startswith("GPTQ")
+
+
+def is_evopress_type(quant: str) -> bool:
+    """True for EVOPRESS_* mixed-GGUF search methods."""
+    key = (quant or "").strip().upper().replace("-", "_").replace(" ", "")
+    return key in _EVOPRESS_ALIASES or key.startswith("EVOPRESS")
+
+
 def format_precision(quant: str) -> str:
     """Q4_K_M → W4A16. Unknown names are returned unchanged."""
     key = (quant or "").strip().upper()
+    compact = key.replace("-", "_").replace(" ", "")
+    if key in _GPTQ_TO_WA:
+        return _GPTQ_TO_WA[key]
+    alias = _GPTQ_ALIASES.get(compact)
+    if alias and alias in _GPTQ_TO_WA:
+        return _GPTQ_TO_WA[alias]
+    if key in _EVOPRESS_TO_WA:
+        return _EVOPRESS_TO_WA[key]
+    evo = _EVOPRESS_ALIASES.get(compact)
+    if evo and evo in _EVOPRESS_TO_WA:
+        return _EVOPRESS_TO_WA[evo]
     if key in _GGUF_TO_WA:
         return _GGUF_TO_WA[key]
     compact = key.replace(" ", "")
@@ -185,10 +232,15 @@ def format_precision(quant: str) -> str:
 
 
 def parse_quant_spec(spec: str) -> str:
-    """W4A16 or Q4_K_M → llama.cpp GGUF type (Q4_K_M)."""
+    """W4A16 or Q4_K_M → llama.cpp GGUF type. GPTQ_4 / EVOPRESS_4 aliases."""
     raw = (spec or "").strip()
     if not raw:
         raise ValueError("Empty precision")
+    key = raw.upper().replace("-", "_").replace(" ", "")
+    if key in _GPTQ_ALIASES:
+        return _GPTQ_ALIASES[key]
+    if key in _EVOPRESS_ALIASES:
+        return _EVOPRESS_ALIASES[key]
     match = _WA_RE.match(raw.upper().replace(" ", ""))
     if match:
         wa = f"W{int(match.group(1))}A{int(match.group(2))}"
@@ -218,7 +270,7 @@ LLAMA_TOOLS = (
     "llama-cli",
     "llama-server",
 )
-_OPT_LLAMA_DIR = Path("/opt/llama.cpp/cuda-12.8")
+_OPT_LLAMA_ROOT = Path("/opt/llama.cpp")
 
 
 def llama_src_dir() -> Path:
@@ -227,6 +279,26 @@ def llama_src_dir() -> Path:
 
 def llama_bin_dir() -> Path:
     return llama_src_dir() / "build" / "bin"
+
+
+def _opt_llama_dir() -> Optional[Path]:
+    """Prebuilt CUDA llama.cpp (Vast image: /opt/llama.cpp/cuda-<ver>)."""
+    if not _OPT_LLAMA_ROOT.is_dir():
+        return None
+    pinned = os.environ.get("FIABLE_LLAMA_DIR")
+    if pinned:
+        path = Path(pinned).expanduser()
+        return path if path.is_dir() else None
+    cuda_dirs = sorted(
+        (p for p in _OPT_LLAMA_ROOT.glob("cuda-*") if p.is_dir()),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    return cuda_dirs[0] if cuda_dirs else None
+
+
+def _has_cuda_backend(bin_dir: Path) -> bool:
+    return bin_dir.is_dir() and any(bin_dir.glob("libggml-cuda*"))
 
 
 def llama_binary(name: str) -> Path:
@@ -241,9 +313,11 @@ def llama_binary(name: str) -> Path:
     built = llama_bin_dir() / name
     if built.is_file():
         return built
-    opt = _OPT_LLAMA_DIR / name
-    if opt.is_file():
-        return opt
+    opt_dir = _opt_llama_dir()
+    if opt_dir is not None:
+        opt = opt_dir / name
+        if opt.is_file():
+            return opt
     return built
 
 
@@ -292,16 +366,61 @@ def _want_cuda() -> bool:
     return _nvcc_path() is not None
 
 
+def _cuda_apt_release() -> Optional[str]:
+    nvcc = _nvcc_path()
+    if nvcc is None:
+        return None
+    try:
+        out = subprocess.check_output([str(nvcc), "--version"], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"release (\d+)\.(\d+)", out)
+    if not match:
+        return None
+    return f"{match.group(1)}-{match.group(2)}"
+
+
+def ensure_cublas_dev() -> None:
+    """Install libcublas-dev so CMake's CUDA::cublas target exists."""
+    cuda_home = Path(os.environ.get("CUDA_HOME") or "/usr/local/cuda")
+    if (cuda_home / "include" / "cublas.h").is_file() and (
+        cuda_home / "lib64" / "libcublas.so"
+    ).exists():
+        return
+    script = Path(__file__).resolve().parents[2] / "scripts" / "install-cuda-dev.sh"
+    if script.is_file():
+        subprocess.run(["bash", str(script)], check=True)
+        return
+    release = _cuda_apt_release()
+    if not release:
+        return
+    pkg = f"libcublas-dev-{release}"
+    apt = ["apt-get", "install", "-y", pkg]
+    if os.geteuid() != 0:
+        apt = ["sudo", *apt]
+    subprocess.run(["apt-get", "update", "-qq"], check=False)
+    subprocess.run(apt, check=True)
+
+
 def ensure_llama_tools(names: Optional[List[str]] = None) -> Dict[str, Path]:
     """Build missing llama.cpp tools into store/llama.cpp/build/bin."""
     names = list(names or LLAMA_TOOLS)
-    src = ensure_llama_src()
+    force_build = os.environ.get("FIABLE_BUILD_LLAMA", "").lower() in {"1", "true", "yes"}
     resolved = {name: llama_binary(name) for name in names}
     have_all = all(path.is_file() for path in resolved.values())
     want_cuda = _want_cuda()
-    cuda_backend = any(llama_bin_dir().glob("libggml-cuda*")) if llama_bin_dir().is_dir() else False
-    if have_all and (not want_cuda or cuda_backend):
+    backend_dirs = {path.parent for path in resolved.values() if path.is_file()}
+    backend_dirs.add(llama_bin_dir())
+    opt_dir = _opt_llama_dir()
+    if opt_dir is not None:
+        backend_dirs.add(opt_dir)
+    cuda_backend = any(_has_cuda_backend(d) for d in backend_dirs)
+    if have_all and not force_build and (not want_cuda or cuda_backend):
         return resolved
+
+    src = ensure_llama_src()
+    if want_cuda:
+        ensure_cublas_dev()
 
     build_dir = src / "build"
     cmake_args = [
@@ -360,3 +479,13 @@ def get_fp16_path(model: ModelConfig) -> Path:
 def get_quantized_path(model: ModelConfig, quant_type: str) -> Path:
     """Get path to quantized model file."""
     return settings.OUTPUT_DIR / f"{model.quant_prefix}-{quant_type}.gguf"
+
+
+def get_quant_meta_path(model: ModelConfig, quant_type: str) -> Path:
+    """Sidecar JSON next to a GGUF (packed GPTQ size, bits, group size)."""
+    return settings.OUTPUT_DIR / f"{model.quant_prefix}-{quant_type}.meta.json"
+
+
+def get_gptq_packed_dir(model: ModelConfig, quant_type: str) -> Path:
+    """Hugging Face GPTQ checkpoint directory."""
+    return settings.OUTPUT_DIR / f"{model.quant_prefix}-{quant_type}"

@@ -14,12 +14,14 @@ from fiable.config.settings import (
     STORE_DIR,
     OUTPUT_DIR,
     MODELS,
-    QUANT_TYPES,
+    DEFAULT_QUANT_TYPES,
     get_model_by_name,
     get_fp16_path,
     get_quantized_path,
     format_precision,
     parse_quant_spec,
+    is_gptq_type,
+    is_evopress_type,
     ensure_llama_src,
     ensure_llama_tools,
     llama_binary,
@@ -251,9 +253,16 @@ def quantize_models(
     
     # Determine quantization types
     if quant_types is None:
-        quant_types = list(QUANT_TYPES)
+        quant_types = list(DEFAULT_QUANT_TYPES)
     else:
         quant_types = [parse_quant_spec(t) for t in quant_types]
+
+    ggml_types = [
+        t for t in quant_types
+        if not is_gptq_type(t) and not is_evopress_type(t)
+    ]
+    gptq_types = [t for t in quant_types if is_gptq_type(t)]
+    evopress_types = [t for t in quant_types if is_evopress_type(t)]
     
     if not models_to_quantize:
         console.print("[red]No valid models to quantize[/red]")
@@ -262,13 +271,14 @@ def quantize_models(
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    console.print("[dim]Ensuring llama-quantize is available...[/dim]")
-    try:
-        tools = ensure_llama_tools(["llama-quantize"])
-        console.print(f"[dim]Using {tools['llama-quantize']}[/dim]\n")
-    except Exception as e:
-        console.print(f"[red]Failed to build llama-quantize: {e}[/red]")
-        return []
+    if ggml_types:
+        console.print("[dim]Ensuring llama-quantize is available...[/dim]")
+        try:
+            tools = ensure_llama_tools(["llama-quantize"])
+            console.print(f"[dim]Using {tools['llama-quantize']}[/dim]\n")
+        except Exception as e:
+            console.print(f"[red]Failed to build llama-quantize: {e}[/red]")
+            return []
     
     console.print(
         f"\n[bold]Quantizing {len(models_to_quantize)} model(s) "
@@ -279,17 +289,29 @@ def quantize_models(
     
     for model in models_to_quantize:
         console.print(f"\n[bold cyan]Processing {model.name}...[/bold cyan]")
-        
-        # Convert to FP16 GGUF first
-        success, fp16_path = convert_to_gguf(model, force=force)
-        if not success or not fp16_path:
-            console.print(f"[red]Skipping {model.name} - conversion failed[/red]")
-            continue
-        
-        # Quantize to each type
-        for quant_type in quant_types:
-            result = quantize_model(model, fp16_path, quant_type, force=force)
-            all_results.append(result)
+
+        fp16_path = None
+        if ggml_types:
+            success, fp16_path = convert_to_gguf(model, force=force)
+            if not success or not fp16_path:
+                console.print(f"[red]Skipping GGML types for {model.name} - conversion failed[/red]")
+            else:
+                for quant_type in ggml_types:
+                    all_results.append(
+                        quantize_model(model, fp16_path, quant_type, force=force)
+                    )
+
+        if gptq_types:
+            from fiable.core.gptq import quantize_gptq
+
+            for quant_type in gptq_types:
+                all_results.append(quantize_gptq(model, quant_type, force=force))
+
+        if evopress_types:
+            from fiable.core.evopress import quantize_evopress
+
+            for quant_type in evopress_types:
+                all_results.append(quantize_evopress(model, quant_type, force=force))
         
         console.print()  # Blank line between models
     

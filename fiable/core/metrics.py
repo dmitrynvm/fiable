@@ -10,7 +10,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from fiable.config.settings import STORE_DIR, OUTPUT_DIR, QUANT_TYPES, MODELS, get_fp16_path
+from fiable.config.settings import (
+    STORE_DIR,
+    OUTPUT_DIR,
+    QUANT_TYPES,
+    GPTQ_TYPES,
+    EVOPRESS_TYPES,
+    DEFAULT_QUANT_TYPES,
+    MODELS,
+    get_fp16_path,
+)
 
 
 BASELINE_QUANTS = ("FP16", "F16", "BF16", "FP32", "F32")
@@ -33,7 +42,7 @@ _GGUF_SIZES = {
 
 
 def known_quant_suffixes() -> List[str]:
-    suffixes = list(QUANT_TYPES) + list(QUANT_ALIASES.keys())
+    suffixes = list(QUANT_TYPES) + list(GPTQ_TYPES) + list(EVOPRESS_TYPES) + list(QUANT_ALIASES.keys())
     return sorted(set(suffixes), key=len, reverse=True)
 
 
@@ -58,7 +67,8 @@ def is_baseline_quant(quant: str) -> bool:
 
 
 def default_eval_paths() -> List[Path]:
-    """FP16 baselines plus quantized GGUFs in store/."""
+    """FP16 baselines plus default comparison GGUFs (Q4_K_M, GPTQ_4, EVOPRESS_4)."""
+    wanted = {q.upper() for q in DEFAULT_QUANT_TYPES}
     seen = set()
     paths: List[Path] = []
     for model in MODELS:
@@ -73,7 +83,10 @@ def default_eval_paths() -> List[Path]:
                 seen.add(path.resolve())
     if OUTPUT_DIR.exists():
         for path in sorted(OUTPUT_DIR.glob("*.gguf")):
-            if path.resolve() not in seen:
+            if path.resolve() in seen:
+                continue
+            _name, quant = parse_model_identity(path)
+            if is_baseline_quant(quant) or quant.upper() in wanted:
                 paths.append(path)
                 seen.add(path.resolve())
     return paths
