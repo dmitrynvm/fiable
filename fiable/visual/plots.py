@@ -21,7 +21,7 @@ from fiable.config.settings import (
     CHART_DPI,
     CHART_COLORS,
     MODELS,
-    QUANT_TYPES,
+    DEFAULT_QUANT_TYPES,
     parse_quant_spec,
     llama_src_dir,
 )
@@ -115,27 +115,16 @@ def _pretty_model(name: str) -> str:
     return " ".join(parts) or name
 
 
-# High-bit → low-bit GGUF methods (baselines first, then QUANT_TYPES).
+# Public comparison methods (baselines first).
 _QUANT_ORDER = (
     "FP32",
     "F32",
     "FP16",
     "F16",
     "BF16",
-    "Q8_0",
-    "Q6_K",
-    "Q5_K_M",
-    "Q5_K_S",
-    "Q5_0",
     "Q4_K_M",
     "GPTQ_4",
     "EVOPRESS_4",
-    "Q4_K_S",
-    "Q4_0",
-    "Q3_K_L",
-    "Q3_K_M",
-    "Q3_K_S",
-    "Q2_K",
 )
 
 
@@ -150,7 +139,7 @@ def _pretty_quant(quant: str) -> str:
     for name in _QUANT_ORDER:
         if name.upper() == upper:
             return name
-    for name in QUANT_TYPES:
+    for name in DEFAULT_QUANT_TYPES:
         if str(name).upper() == upper:
             return name
     try:

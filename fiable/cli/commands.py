@@ -94,7 +94,7 @@ def quantize_cmd(
     
     Example:
         fiable quantize
-        fiable quantize "Llama 3.1 8B" --types "W4A16,W8A16"
+        fiable quantize "Llama 3.1 8B" --types "Q4_K_M,GPTQ,EVOPRESS"
     """
     console.print("[bold cyan]Quantizing models...[/bold cyan]\n")
     
@@ -117,7 +117,7 @@ def quantize_cmd(
 def evaluate_cmd(
     model_paths: Optional[List[Path]] = typer.Argument(
         None,
-        help="GGUF paths (default: FP16 + Q4_K_M, GPTQ_4, EVOPRESS_4)",
+        help="GGUF paths (default: FP16 + Q4_K_M + GPTQ_4 + EVOPRESS_4 in store/)",
     ),
     perplexity: bool = typer.Option(
         True,
@@ -142,7 +142,7 @@ def evaluate_cmd(
     kl: bool = typer.Option(
         True,
         "--kl/--no-kl",
-        help="KL divergence vs FP16 (or Q8_0) logits",
+        help="KL divergence vs FP16 logits",
     ),
     dataset: str = typer.Option(
         "wikitext",
@@ -178,8 +178,9 @@ def evaluate_cmd(
     """
     Evaluate quantized models against an FP16 baseline.
 
-    By default, evaluates all GGUF files in store/ (FP16 + quants)
-    and writes charts next to the JSON report.
+    By default, evaluates FP16 plus Q4_K_M, GPTQ_4, and EVOPRESS_4 in store/
+    (not the extra uniform K-quants EvoPress uses as a search database).
+    Writes charts next to the JSON report.
 
     Example:
         fiable evaluate
@@ -324,9 +325,9 @@ def _status_style(quant: str) -> str:
     q = (quant or "").upper()
     if q in ("FP16", "F16", "BF16", "FP32", "F32"):
         return "yellow"
-    if q in ("Q8_0", "Q6_K"):
+    if q in ("Q4_K_M", "GPTQ_4", "GPTQ"):
         return "white"
-    if q.startswith("Q2"):
+    if q.startswith("EVOPRESS"):
         return "cyan"
     return "magenta"
 
@@ -381,11 +382,7 @@ def store_cmd():
             table.add_row(model.name, "[dim]None[/dim]", "—", "—", "—")
 
         files_by_type = {q: (path, size) for q, path, size in quantized.get(model.name, [])}
-        listed_types = (
-            list(settings.QUANT_TYPES)
-            + list(settings.GPTQ_TYPES)
-            + list(settings.EVOPRESS_TYPES)
-        )
+        listed_types = list(settings.DEFAULT_QUANT_TYPES)
         for quant_type in listed_types:
             if quant_type not in files_by_type:
                 continue
@@ -400,11 +397,7 @@ def store_cmd():
         except Exception:
             size = utils.helpers.get_file_size_gb(path)
         stem = path.stem
-        listed = (
-            list(settings.QUANT_TYPES)
-            + list(settings.GPTQ_TYPES)
-            + list(settings.EVOPRESS_TYPES)
-        )
+        listed = list(settings.DEFAULT_QUANT_TYPES)
         quant_type = next(
             (q for q in listed if stem.endswith(f"-{q}")),
             "unknown",

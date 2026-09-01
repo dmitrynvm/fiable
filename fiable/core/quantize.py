@@ -232,7 +232,7 @@ def quantize_models(
     
     Args:
         model_names: List of model names. If None, quantize all.
-        quant_types: List of quantization types. If None, use all.
+        quant_types: List of quantization types. If None, Q4_K_M / GPTQ_4 / EVOPRESS_4.
         force: Force re-quantization even if exists
         
     Returns:

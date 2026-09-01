@@ -19,6 +19,8 @@ from fiable.config.settings import (
     DEFAULT_QUANT_TYPES,
     MODELS,
     get_fp16_path,
+    get_quantized_path,
+    parse_quant_spec,
 )
 
 
@@ -29,6 +31,12 @@ QUANT_ALIASES = {
     "BF16": "BF16",
     "F32": "FP32",
     "FP32": "FP32",
+    "GPTQ": "GPTQ_4",
+    "GPTQ4": "GPTQ_4",
+    "GPTQ_4": "GPTQ_4",
+    "EVOPRESS": "EVOPRESS_4",
+    "EVOPRESS4": "EVOPRESS_4",
+    "EVOPRESS_4": "EVOPRESS_4",
 }
 
 _GGUF_STRING = 8
@@ -66,29 +74,46 @@ def is_baseline_quant(quant: str) -> bool:
     return quant.upper() in {q.upper() for q in BASELINE_QUANTS} | {"FP16", "BF16", "FP32"}
 
 
-def default_eval_paths() -> List[Path]:
-    """FP16 baselines plus default comparison GGUFs (Q4_K_M, GPTQ_4, EVOPRESS_4)."""
-    wanted = {q.upper() for q in DEFAULT_QUANT_TYPES}
+def canonical_eval_quant(quant: str) -> str:
+    """Map filename / CLI aliases onto the GGUF type used in reports."""
+    token = (quant or "").strip().upper().replace("-", "_").replace(" ", "")
+    return QUANT_ALIASES.get(token, token)
+
+
+def default_eval_paths(quant_types: Optional[Iterable[str]] = None) -> List[Path]:
+    """FP16 baselines plus Q4_K_M, GPTQ_4, and EVOPRESS_4 (or ``quant_types``)."""
+    if quant_types is None:
+        wanted_list = list(DEFAULT_QUANT_TYPES)
+    else:
+        wanted_list = [parse_quant_spec(q) if q else q for q in quant_types]
+    wanted = {canonical_eval_quant(q) for q in wanted_list if q}
     seen = set()
     paths: List[Path] = []
+
+    def add(path: Path) -> None:
+        if not path.is_file():
+            return
+        key = path.resolve()
+        if key in seen:
+            return
+        paths.append(path)
+        seen.add(key)
+
     for model in MODELS:
-        fp16 = get_fp16_path(model)
-        if fp16.exists() and fp16.resolve() not in seen:
-            paths.append(fp16)
-            seen.add(fp16.resolve())
-    for pattern in ("*fp16.gguf", "*FP16.gguf", "*f16.gguf"):
-        for path in sorted(STORE_DIR.glob(pattern)):
-            if path.resolve() not in seen:
-                paths.append(path)
-                seen.add(path.resolve())
-    if OUTPUT_DIR.exists():
-        for path in sorted(OUTPUT_DIR.glob("*.gguf")):
-            if path.resolve() in seen:
-                continue
+        add(get_fp16_path(model))
+        for quant in wanted_list:
+            add(get_quantized_path(model, quant))
+
+    roots = []
+    for root in (STORE_DIR, OUTPUT_DIR):
+        if root.exists() and root.resolve() not in roots:
+            roots.append(root.resolve())
+    for root in roots:
+        for path in sorted(root.glob("*.gguf")):
             _name, quant = parse_model_identity(path)
-            if is_baseline_quant(quant) or quant.upper() in wanted:
-                paths.append(path)
-                seen.add(path.resolve())
+            canon = canonical_eval_quant(quant)
+            if is_baseline_quant(canon) or canon in wanted:
+                add(path)
     return paths
 
 
@@ -216,7 +241,7 @@ def _harmonic_mean(a: float, b: float) -> Optional[float]:
 
 
 def pick_baseline(group: Iterable) -> Optional[object]:
-    """Prefer FP16/BF16, then Q8_0, then the largest file in the group."""
+    """Prefer FP16/BF16, then the largest file in the group."""
     items = list(group)
     if not items:
         return None
@@ -224,9 +249,6 @@ def pick_baseline(group: Iterable) -> Optional[object]:
         for item in items:
             if str(getattr(item, "quantization_type", "")).upper() == preferred:
                 return item
-    for item in items:
-        if str(getattr(item, "quantization_type", "")).upper() == "Q8_0":
-            return item
     return max(items, key=lambda r: getattr(r, "file_size_gb", 0.0) or 0.0)
 
 

@@ -263,15 +263,16 @@ def _ensure_wikitext(split: str = "test") -> Path:
 
 
 def _parse_perplexity(stdout: str) -> Optional[float]:
-    patterns = [
-        r"Final estimate:\s*PPL\s*=\s*([0-9.]+)",
+    finals = re.findall(r"Final estimate:\s*PPL\s*=\s*([0-9.]+)", stdout, re.IGNORECASE)
+    if finals:
+        return float(finals[-1])
+    for pattern in (
         r"perplexity:\s*([0-9.]+)",
         r"\bPPL\s*=\s*([0-9.]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, stdout, re.IGNORECASE)
-        if match:
-            return float(match.group(1))
+    ):
+        matches = re.findall(pattern, stdout, re.IGNORECASE)
+        if matches:
+            return float(matches[-1])
     return None
 
 
@@ -914,7 +915,7 @@ def evaluate_models(
     if per_model:
         console.print(f"[dim]Per model: {' → '.join(per_model)}[/dim]")
     if run_kl:
-        console.print("[dim]After all models: KL vs FP16/Q8 baseline[/dim]")
+        console.print("[dim]After all models: KL vs FP16 baseline[/dim]")
     console.print()
 
     results = []
@@ -944,7 +945,7 @@ def evaluate_models(
 
     annotate_relative_metrics(results)
     if run_kl and results:
-        evaluate_kl_vs_baseline(results)
+        evaluate_kl_vs_baseline(results, chunks=limit)
 
     print_evaluation_summary(results)
 

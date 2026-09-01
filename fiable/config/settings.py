@@ -72,11 +72,10 @@ class Settings:
         "#8c564b",  # tab:brown
     ]
 
-    # GGML ladder (still used as EvoPress layer database / --types).
-    QUANT_TYPES: List[str] = ["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"]
+    # Public llama.cpp type. EvoPress still builds Q2_K…Q6_K internally as a search DB.
+    QUANT_TYPES: List[str] = ["Q4_K_M"]
     GPTQ_TYPES: List[str] = ["GPTQ_4"]
     EVOPRESS_TYPES: List[str] = ["EVOPRESS_4"]
-    # Default `fiable quantize` / `fiable evaluate` comparison set.
     DEFAULT_QUANT_TYPES: List[str] = ["Q4_K_M", "GPTQ_4", "EVOPRESS_4"]
 
     # Available models
@@ -167,29 +166,14 @@ _GGUF_TO_WA = {
     "BF16": "W16A16",
     "FP32": "W32A32",
     "F32": "W32A32",
-    "Q8_0": "W8A16",
-    "Q6_K": "W6A16",
-    "Q5_K_M": "W5A16",
-    "Q5_K_S": "W5A16",
-    "Q5_0": "W5A16",
     "Q4_K_M": "W4A16",
-    "Q4_K_S": "W4A16",
-    "Q4_0": "W4A16",
-    "Q3_K_M": "W3A16",
-    "Q3_K_S": "W3A16",
-    "Q3_K_L": "W3A16",
-    "Q2_K": "W2A16",
 }
 _WA_TO_GGUF = {
     "W16A16": "FP16",
     "W32A32": "FP32",
-    "W8A16": "Q8_0",
-    "W6A16": "Q6_K",
-    "W5A16": "Q5_K_M",
     "W4A16": "Q4_K_M",
-    "W3A16": "Q3_K_M",
-    "W2A16": "Q2_K",
 }
+_PUBLIC_GGUF = {"Q4_K_M", "FP16", "F16", "BF16", "FP32", "F32"}
 _WA_RE = re.compile(r"^W(\d+)A(\d+)(?:G(\d+))?$", re.IGNORECASE)
 
 
@@ -247,17 +231,22 @@ def parse_quant_spec(spec: str) -> str:
         gguf = _WA_TO_GGUF.get(wa)
         if gguf is None:
             known = ", ".join(_WA_TO_GGUF)
-            raise ValueError(f"Unknown precision '{raw}'. Use GGUF names or: {known}")
+            raise ValueError(
+                f"Unknown precision '{raw}'. Use Q4_K_M, GPTQ_4, EVOPRESS_4, or: {known}"
+            )
         act = int(match.group(2))
         if act not in (16, 32):
-            alt = f"W{int(match.group(1))}A16"
-            hint = _WA_TO_GGUF.get(alt)
-            extra = f" Try {alt}" + (f" ({hint})" if hint else "") + "."
+            extra = " Try W4A16 (Q4_K_M)."
             raise ValueError(
                 f"'{raw}' needs {act}-bit activations; GGUF quants are weight-only (A16).{extra}"
             )
         return gguf
-    return raw
+    if key in _PUBLIC_GGUF:
+        return "FP16" if key in {"F16"} else key
+    raise ValueError(
+        f"Unknown method '{raw}'. Supported: Q4_K_M, GPTQ_4, EVOPRESS_4 "
+        f"(aliases: W4A16, GPTQ, EVOPRESS)."
+    )
 
 
 # Keep Hugging Face datasets under store/

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -146,23 +147,45 @@ def _wikitext2_train_texts(n_take: int = 2048) -> List[str]:
 
 
 def _convert_packed_to_gguf(packed_dir: Path, gguf_path: Path) -> None:
+    """Dequantize GPTQ with GPTQModel, then convert dense HF weights to F16 GGUF.
+
+    llama.cpp's convert path unpacks GPTQ itself and is wrong for some
+    Llama + desc_act checkpoints (WikiText PPL explodes while KL/GSM8K look fine).
+    """
     from fiable.core.quantize import _ensure_hf_convert_deps
+    import torch
+    from gptqmodel.utils.model_dequant import dequantize_model
 
     llama_cpp_dir = ensure_llama_src()
     _ensure_hf_convert_deps()
     convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
     if not convert_script.is_file():
         raise FileNotFoundError(f"convert_hf_to_gguf.py not found: {convert_script}")
-    cmd = [
-        sys.executable,
-        str(convert_script),
-        str(packed_dir),
-        "--outfile",
-        str(gguf_path),
-        "--outtype",
-        "f16",
-    ]
-    helpers.run_command(cmd, shell=False, capture_output=False)
+
+    dequant_dir = packed_dir.parent / f"{packed_dir.name}-dequant-f16"
+    if dequant_dir.exists():
+        shutil.rmtree(dequant_dir)
+    console.print("[cyan]Dequantizing GPTQ → dense FP16 (GPTQModel), then GGUF...[/cyan]")
+    dequantize_model(
+        packed_dir,
+        dequant_dir,
+        target_dtype=torch.float16,
+        device=None,
+    )
+    try:
+        cmd = [
+            sys.executable,
+            str(convert_script),
+            str(dequant_dir),
+            "--outfile",
+            str(gguf_path),
+            "--outtype",
+            "f16",
+            "--no-lazy",
+        ]
+        helpers.run_command(cmd, shell=False, capture_output=False)
+    finally:
+        shutil.rmtree(dequant_dir, ignore_errors=True)
 
 
 def quantize_gptq(
@@ -188,7 +211,13 @@ def quantize_gptq(
             error=msg,
         )
 
-    if gguf_path.exists() and meta_path.exists() and not force:
+    packed_ready = packed_dir.is_dir() and any(packed_dir.glob("*.safetensors"))
+    if (
+        packed_ready
+        and gguf_path.exists()
+        and meta_path.exists()
+        and not force
+    ):
         file_size = effective_size_gb(gguf_path)
         console.print(
             f"[yellow]Skipping {quant_type} - already exists "
@@ -206,41 +235,47 @@ def quantize_gptq(
     start_time = time.time()
     try:
         _ensure_gptqmodel()
-        from gptqmodel import GPTQModel, QuantizeConfig
+        need_quant = force or not packed_ready
+        if need_quant:
+            from gptqmodel import GPTQModel, QuantizeConfig
 
-        console.print(
-            f"[cyan]GPTQ {quant_type}: {GPTQ_BITS}-bit g{GPTQ_GROUP_SIZE} "
-            f"act-order, WikiText-2 train calib ({CALIB_SAMPLES}×{CALIB_SEQLEN})...[/cyan]"
-        )
-        calib = _wikitext2_train_texts(n_take=max(512, CALIB_SAMPLES * 4))
-        qcfg = QuantizeConfig(
-            bits=GPTQ_BITS,
-            group_size=GPTQ_GROUP_SIZE,
-            desc_act=GPTQ_DESC_ACT,
-        )
-        gptq_model = GPTQModel.load(str(hf_dir), qcfg)
-        quantize_kwargs = {
-            "batch_size": 1,
-            "calibration_dataset_concat_size": CALIB_SEQLEN,
-            "calibration_dataset_min_length": CALIB_MIN_CHARS,
-        }
-        try:
-            gptq_model.quantize(calib[: CALIB_SAMPLES * 8], **quantize_kwargs)
-        except TypeError:
-            gptq_model.quantize(calib[: CALIB_SAMPLES * 8], batch_size=1)
+            console.print(
+                f"[cyan]GPTQ {quant_type}: {GPTQ_BITS}-bit g{GPTQ_GROUP_SIZE} "
+                f"act-order, WikiText-2 train calib ({CALIB_SAMPLES}×{CALIB_SEQLEN})...[/cyan]"
+            )
+            calib = _wikitext2_train_texts(n_take=max(512, CALIB_SAMPLES * 4))
+            qcfg = QuantizeConfig(
+                bits=GPTQ_BITS,
+                group_size=GPTQ_GROUP_SIZE,
+                desc_act=GPTQ_DESC_ACT,
+            )
+            gptq_model = GPTQModel.load(str(hf_dir), qcfg)
+            quantize_kwargs = {
+                "batch_size": 1,
+                "calibration_dataset_concat_size": CALIB_SEQLEN,
+                "calibration_dataset_min_length": CALIB_MIN_CHARS,
+            }
+            try:
+                gptq_model.quantize(calib[: CALIB_SAMPLES * 8], **quantize_kwargs)
+            except TypeError:
+                gptq_model.quantize(calib[: CALIB_SAMPLES * 8], batch_size=1)
 
-        packed_dir.mkdir(parents=True, exist_ok=True)
-        gptq_model.save(str(packed_dir))
-        del gptq_model
-        try:
-            import gc
-            import torch
+            packed_dir.mkdir(parents=True, exist_ok=True)
+            gptq_model.save(str(packed_dir))
+            del gptq_model
+            try:
+                import gc
+                import torch
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        else:
+            console.print(
+                f"[cyan]Reusing packed GPTQ at {packed_dir.name}, rebuilding GGUF...[/cyan]"
+            )
 
         console.print(f"[cyan]Converting GPTQ checkpoint to GGUF F16 ({gguf_path.name})...[/cyan]")
         _convert_packed_to_gguf(packed_dir, gguf_path)
